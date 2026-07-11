@@ -17,6 +17,10 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class EmailRequest(BaseModel):
+    email: str
+
+
 @router.post("/register")
 async def register(req: RegisterRequest):
     try:
@@ -31,6 +35,17 @@ async def register(req: RegisterRequest):
             "message": "Registrierung erfolgreich. Bitte E-Mail bestätigen.",
             "user_id": response.user.id,
         }
+    except Exception as e:
+        detail = str(e)
+        status_code = 429 if "rate limit" in detail.lower() else 400
+        raise HTTPException(status_code, detail)
+
+
+@router.post("/resend-confirmation")
+async def resend_confirmation(req: EmailRequest):
+    try:
+        supabase.auth.resend({"type": "signup", "email": req.email})
+        return {"message": "Bestaetigungs-E-Mail wurde erneut gesendet."}
     except Exception as e:
         detail = str(e)
         status_code = 429 if "rate limit" in detail.lower() else 400
