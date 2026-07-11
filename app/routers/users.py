@@ -47,5 +47,14 @@ async def login(req: LoginRequest):
             "access_token": response.session.access_token,
             "user": response.user,
         }
-    except Exception:
-        raise HTTPException(401, "Falsche Zugangsdaten")
+    except Exception as e:
+        detail = str(e)
+        detail_lower = detail.lower()
+
+        if "email not confirmed" in detail_lower:
+            raise HTTPException(401, "Bitte bestaetige zuerst deine E-Mail-Adresse.")
+
+        if "invalid login credentials" in detail_lower:
+            raise HTTPException(401, "Falsche Zugangsdaten")
+
+        raise HTTPException(401, detail)
