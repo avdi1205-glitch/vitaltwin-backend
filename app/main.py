@@ -1,10 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from pathlib import Path
 
-ENV_PATH = Path(__file__).resolve().parents[1] / '.env'
-load_dotenv(dotenv_path=ENV_PATH)
+load_dotenv()
 
 app = FastAPI(title="VitalTwin DE")
 
