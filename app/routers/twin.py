@@ -176,7 +176,7 @@ def _build_recommendations(marker_breakdown: list[dict[str, Any]], config: dict[
             break
 
     if not recommendations:
-        recommendations.append("Marker sind stabil. Werte regelmaessig weiter tracken.")
+        recommendations.append("Marker sind stabil. Werte regelmäßig weiter tracken.")
 
     return recommendations
 
