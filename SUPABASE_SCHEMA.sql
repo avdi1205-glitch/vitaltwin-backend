@@ -67,3 +67,9 @@ create table if not exists public.vt_twin_calculations (
 
 create index if not exists idx_vt_twin_calculations_email_created_at
   on public.vt_twin_calculations (email, created_at desc);
+
+-- Required for backend inserts when using current auth setup.
+alter table public.vt_twin_calculations disable row level security;
+
+-- Reload PostgREST schema cache.
+notify pgrst, 'reload schema';

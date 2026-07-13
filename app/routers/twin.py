@@ -128,9 +128,9 @@ def _store_calculation(
     data: TwinInput,
     result: dict[str, Any],
     marker_breakdown: list[dict[str, Any]],
-) -> tuple[bool, str | None]:
+) -> None:
     if not email:
-        return False, "Kein User fuer Speicherung (Token fehlt oder ungueltig)."
+        return
 
     try:
         supabase.table(CALC_TABLE).insert(
@@ -148,10 +148,10 @@ def _store_calculation(
                 "marker_breakdown": marker_breakdown,
             }
         ).execute()
-        return True, None
     except Exception as exc:
         # Keep calculate endpoint stable even if persistence is temporarily unavailable.
-        return False, str(exc)
+        print(f"Failed to store calculation history: {exc}")
+        return
 
 @router.post("/calculate")
 async def calculate(data: TwinInput):
@@ -190,13 +190,7 @@ async def calculate(data: TwinInput):
     }
 
     email = get_email_by_token(data.token)
-    saved, save_error = _store_calculation(email, data, result, marker_breakdown)
-
-    result["persistence"] = {
-        "saved": saved,
-        "email": email,
-        "error": save_error,
-    }
+    _store_calculation(email, data, result, marker_breakdown)
 
     return result
 
