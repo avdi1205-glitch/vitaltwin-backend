@@ -21,6 +21,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ResetPasswordRequest(BaseModel):
+    email: str
+    password: str
+
+
 def _db_get_user(email: str) -> dict[str, object] | None:
     try:
         response = (
@@ -70,6 +75,19 @@ def _db_update_premium(email: str, premium: bool) -> bool:
         return False
 
 
+def _db_update_password(email: str, password: str) -> bool:
+    try:
+        (
+            supabase.table(USER_TABLE)
+            .update({"password": password})
+            .eq("email", email)
+            .execute()
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _normalize_user_record(record: dict[str, object]) -> dict[str, object]:
     return {
         "password": record.get("password", ""),
@@ -106,6 +124,17 @@ def set_premium_by_email(email: str, premium: bool) -> bool:
         user["premium"] = premium
 
     db_updated = _db_update_premium(normalized_email, premium)
+    return bool(user) or db_updated
+
+
+def set_password_by_email(email: str, password: str) -> bool:
+    normalized_email = email.lower()
+    user = _get_user(normalized_email)
+
+    if user:
+        user["password"] = password
+
+    db_updated = _db_update_password(normalized_email, password)
     return bool(user) or db_updated
 
 @router.post("/register")
@@ -146,6 +175,21 @@ async def login(req: LoginRequest):
         "email": email,
         "premium": bool(user.get("premium", False)),
     }
+
+
+@router.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest):
+    email = req.email.strip().lower()
+    user = _get_user(email)
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Kein Konto mit dieser E-Mail gefunden")
+
+    updated = set_password_by_email(email, req.password)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Passwort konnte nicht aktualisiert werden")
+
+    return {"message": "Passwort erfolgreich aktualisiert", "email": email}
 
 
 @router.get("/me")
