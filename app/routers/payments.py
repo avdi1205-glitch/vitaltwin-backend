@@ -11,6 +11,15 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 router = APIRouter()
 
+
+def _trial_days() -> int:
+    raw = os.getenv("STRIPE_TRIAL_DAYS", "30").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 30
+    return max(0, value)
+
 class CreateCheckout(BaseModel):
     price_id: str
     token: str | None = None
@@ -28,20 +37,25 @@ async def create_checkout(data: CreateCheckout):
         raise HTTPException(status_code=401, detail="Bitte zuerst einloggen")
 
     frontend_base_url = os.getenv("FRONTEND_BASE_URL", "https://www.vitaltwin.de").rstrip("/")
+    trial_days = _trial_days()
+
+    checkout_payload = {
+        "payment_method_types": ['card'],
+        "line_items": [{'price': data.price_id, 'quantity': 1}],
+        "mode": 'subscription',
+        "customer_email": email,
+        "client_reference_id": email,
+        "metadata": {
+            'user_email': email,
+        },
+        "success_url": f'{frontend_base_url}/dashboard?payment=success',
+        "cancel_url": f'{frontend_base_url}/preise?payment=cancelled',
+    }
+    if trial_days > 0:
+        checkout_payload["subscription_data"] = {"trial_period_days": trial_days}
 
     try:
-        session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            line_items=[{'price': data.price_id, 'quantity': 1}],
-            mode='subscription',
-            customer_email=email,
-            client_reference_id=email,
-            metadata={
-                'user_email': email,
-            },
-            success_url=f'{frontend_base_url}/dashboard?payment=success',
-            cancel_url=f'{frontend_base_url}/preise?payment=cancelled',
-        )
+        session = stripe.checkout.Session.create(**checkout_payload)
         return {"url": session.url}
     except Exception as e:
         raise HTTPException(400, str(e))
