@@ -325,10 +325,12 @@ async def history(
     if not email:
         raise HTTPException(status_code=401, detail="Session abgelaufen")
 
-    if not is_premium_by_email(email):
-        return {"items": []}
-
-    query_limit = 10 if limit <= 0 else min(limit, 50)
+    premium = is_premium_by_email(email)
+    if premium:
+        query_limit = 10 if limit <= 0 else min(limit, 50)
+    else:
+        # Starter can still access their latest saved run to avoid empty dashboards.
+        query_limit = 1
 
     try:
         response = (
