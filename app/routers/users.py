@@ -17,6 +17,7 @@ token_to_email: dict[str, str] = {}
 feedback_store: list[dict[str, object]] = []
 USER_TABLE = "vt_users"
 FEEDBACK_TABLE = "vt_user_feedback"
+CALC_TABLE = "vt_twin_calculations"
 
 class RegisterRequest(BaseModel):
     email: str
@@ -120,6 +121,20 @@ def _db_store_feedback(email: str, score: int, message: str, source: str | None)
             .execute()
         )
         return True
+    except Exception:
+        return False
+
+
+def _db_has_calculation(email: str) -> bool:
+    try:
+        response = (
+            supabase.table(CALC_TABLE)
+            .select("id")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data)
     except Exception:
         return False
 
@@ -311,10 +326,43 @@ async def me(authorization: str | None = Header(default=None)):
     if not user:
         raise HTTPException(status_code=404, detail="User nicht gefunden")
 
+    premium = bool(user.get("premium", False))
+    starter_calc_remaining: int | None = None
+    if not premium:
+        starter_calc_remaining = 0 if _db_has_calculation(email) else 1
+
     return {
         "email": email,
         "full_name": user.get("full_name"),
-        "premium": bool(user.get("premium", False)),
+        "premium": premium,
+        "starter_calc_remaining": starter_calc_remaining,
+    }
+
+
+@router.post("/activate-beta")
+async def activate_beta(authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Nicht eingeloggt")
+
+    token = authorization.split(" ", 1)[1].strip()
+    email = get_email_by_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Session abgelaufen")
+
+    user = _get_user(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User nicht gefunden")
+
+    if bool(user.get("premium", False)):
+        return {"message": "Beta-Zugang ist bereits aktiv.", "premium": True}
+
+    updated = set_premium_by_email(email, True)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Beta-Zugang konnte nicht aktiviert werden")
+
+    return {
+        "message": "Beta-Zugang kostenlos aktiviert. Danke, dass du als Tester dabei bist.",
+        "premium": True,
     }
 
 
