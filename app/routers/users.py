@@ -115,8 +115,11 @@ def _verify_google_credential(credential: str) -> dict[str, object]:
         raise HTTPException(status_code=401, detail="Google-E-Mail ist nicht verifiziert")
 
     expected_audience = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    if not expected_audience:
+        raise HTTPException(status_code=500, detail="Google-Login ist serverseitig nicht konfiguriert")
+
     audience = str(payload.get("aud", "")).strip()
-    if expected_audience and audience != expected_audience:
+    if audience != expected_audience:
         raise HTTPException(status_code=401, detail="Google-Token ist für eine andere App ausgestellt")
 
     full_name = str(payload.get("name", "")).strip()
