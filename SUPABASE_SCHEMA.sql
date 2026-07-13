@@ -112,8 +112,21 @@ create table if not exists public.vt_twin_calculations (
 create index if not exists idx_vt_twin_calculations_email_created_at
   on public.vt_twin_calculations (email, created_at desc);
 
+create table if not exists public.vt_user_feedback (
+  id bigint generated always as identity primary key,
+  email text not null,
+  score integer not null,
+  message text not null,
+  source text not null default 'dashboard',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_vt_user_feedback_email_created_at
+  on public.vt_user_feedback (email, created_at desc);
+
 -- Required for backend inserts when using current auth setup.
 alter table public.vt_twin_calculations disable row level security;
+alter table public.vt_user_feedback disable row level security;
 
 -- Reload PostgREST schema cache.
 notify pgrst, 'reload schema';

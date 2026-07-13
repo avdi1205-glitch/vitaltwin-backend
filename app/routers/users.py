@@ -14,7 +14,9 @@ router = APIRouter()
 
 users_store: dict[str, dict[str, object]] = {}
 token_to_email: dict[str, str] = {}
+feedback_store: list[dict[str, object]] = []
 USER_TABLE = "vt_users"
+FEEDBACK_TABLE = "vt_user_feedback"
 
 class RegisterRequest(BaseModel):
     email: str
@@ -33,6 +35,12 @@ class ResetPasswordRequest(BaseModel):
 
 class GoogleLoginRequest(BaseModel):
     credential: str
+
+
+class FeedbackRequest(BaseModel):
+    score: int
+    message: str
+    source: str | None = None
 
 
 def _db_get_user(email: str) -> dict[str, object] | None:
@@ -90,6 +98,25 @@ def _db_update_password(email: str, password: str) -> bool:
             supabase.table(USER_TABLE)
             .update({"password": password})
             .eq("email", email)
+            .execute()
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _db_store_feedback(email: str, score: int, message: str, source: str | None) -> bool:
+    try:
+        (
+            supabase.table(FEEDBACK_TABLE)
+            .insert(
+                {
+                    "email": email,
+                    "score": score,
+                    "message": message,
+                    "source": source or "dashboard",
+                }
+            )
             .execute()
         )
         return True
@@ -280,4 +307,36 @@ async def me(authorization: str | None = Header(default=None)):
         "email": email,
         "full_name": user.get("full_name"),
         "premium": bool(user.get("premium", False)),
+    }
+
+
+@router.post("/feedback")
+async def submit_feedback(req: FeedbackRequest, authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Nicht eingeloggt")
+
+    token = authorization.split(" ", 1)[1].strip()
+    email = get_email_by_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Session abgelaufen")
+
+    score = max(1, min(5, req.score))
+    message = req.message.strip()
+    if len(message) < 5:
+        raise HTTPException(status_code=400, detail="Bitte gib mindestens 5 Zeichen Feedback ein")
+
+    saved_to_db = _db_store_feedback(email, score, message, req.source)
+    feedback_store.append(
+        {
+            "email": email,
+            "score": score,
+            "message": message,
+            "source": req.source or "dashboard",
+        }
+    )
+
+    return {
+        "message": "Danke für dein Feedback!",
+        "saved": True,
+        "storage": "database" if saved_to_db else "memory",
     }
