@@ -4,7 +4,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from ..core.supabase import supabase
-from .users import get_email_by_token
+from .users import get_email_by_token, is_premium_by_email
 
 router = APIRouter()
 
@@ -232,6 +232,21 @@ def _build_marker_references(config: dict[str, dict[str, Any]]) -> list[dict[str
         )
     return references
 
+
+def _has_existing_calculation(email: str) -> bool:
+    try:
+        response = (
+            supabase.table(CALC_TABLE)
+            .select("id")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data)
+    except Exception:
+        # If storage is unavailable, do not block calculation solely due to lookup issues.
+        return False
+
 @router.post("/calculate")
 async def calculate(data: TwinInput):
     marker_config = _load_marker_config()
@@ -256,24 +271,42 @@ async def calculate(data: TwinInput):
     bio_age = float(data.age) + sum(item["contribution"] for item in marker_breakdown)
     recommendations = _build_recommendations(marker_breakdown, marker_config)
 
+    email = get_email_by_token(data.token)
+    is_premium = bool(email) and is_premium_by_email(email)
+
+    if email and not is_premium and _has_existing_calculation(email):
+        raise HTTPException(
+            status_code=403,
+            detail="Starter enthält eine einmalige Twin-Berechnung. Aktiviere den Beta-Zugang für unbegrenzte Simulationen.",
+        )
+
+    starter_recommendations = [
+        "Achte auf Schlaf, Stressmanagement und regelmäßige Bewegung.",
+        "Kontrolliere deine Marker regelmäßig für bessere Vergleichbarkeit.",
+        "Für personalisierte Szenarien und Verlauf aktiviere den Beta-Zugang.",
+    ]
+
     result = {
         "biologisches_alter": round(bio_age, 1),
         "differenz": round(bio_age - data.age, 1),
         "scenarios": {
             "aktuell": round(bio_age, 1),
-            "optimiert": round(bio_age - 5.5, 1),
-            "aggressiv": round(bio_age - 9.0, 1),
+            "optimiert": round(bio_age - 5.5, 1) if is_premium else round(bio_age, 1),
+            "aggressiv": round(bio_age - 9.0, 1) if is_premium else round(bio_age, 1),
         },
         "methodik": {
             "typ": "Wellness-Orientierung",
-            "hinweis": "Kein medizinisches Produkt. Keine Diagnose oder Therapieempfehlung.",
+            "hinweis": (
+                "Kein medizinisches Produkt. Keine Diagnose oder Therapieempfehlung."
+                if is_premium
+                else "Starter-Modus: Basis-Auswertung. Für vollständige Simulationen und Detailquellen aktiviere den Beta-Zugang."
+            ),
         },
-        "marker_references": _build_marker_references(marker_config),
-        "empfehlungen": recommendations,
+        "marker_references": _build_marker_references(marker_config) if is_premium else [],
+        "empfehlungen": recommendations if is_premium else starter_recommendations,
         "marker_breakdown": marker_breakdown,
     }
 
-    email = get_email_by_token(data.token)
     _store_calculation(email, data, result, marker_breakdown)
 
     return result
@@ -291,6 +324,9 @@ async def history(
     email = get_email_by_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Session abgelaufen")
+
+    if not is_premium_by_email(email):
+        return {"items": []}
 
     query_limit = 10 if limit <= 0 else min(limit, 50)
 

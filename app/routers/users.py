@@ -205,6 +205,14 @@ def set_password_by_email(email: str, password: str) -> bool:
     db_updated = _db_update_password(normalized_email, password)
     return bool(user) or db_updated
 
+
+def is_premium_by_email(email: str) -> bool:
+    normalized_email = email.strip().lower()
+    user = _get_user(normalized_email)
+    if not user:
+        return False
+    return bool(user.get("premium", False))
+
 @router.post("/register")
 async def register(req: RegisterRequest):
     email = req.email.strip().lower()
