@@ -123,7 +123,15 @@ def _build_recommendations(marker_breakdown: list[dict[str, Any]], config: dict[
     return recommendations
 
 
-def _store_calculation(email: str | None, data: TwinInput, result: dict[str, Any], marker_breakdown: list[dict[str, Any]]) -> None:
+def _store_calculation(
+    email: str | None,
+    data: TwinInput,
+    result: dict[str, Any],
+    marker_breakdown: list[dict[str, Any]],
+) -> tuple[bool, str | None]:
+    if not email:
+        return False, "Kein User fuer Speicherung (Token fehlt oder ungueltig)."
+
     try:
         supabase.table(CALC_TABLE).insert(
             {
@@ -140,9 +148,10 @@ def _store_calculation(email: str | None, data: TwinInput, result: dict[str, Any
                 "marker_breakdown": marker_breakdown,
             }
         ).execute()
-    except Exception:
+        return True, None
+    except Exception as exc:
         # Keep calculate endpoint stable even if persistence is temporarily unavailable.
-        return
+        return False, str(exc)
 
 @router.post("/calculate")
 async def calculate(data: TwinInput):
@@ -181,7 +190,13 @@ async def calculate(data: TwinInput):
     }
 
     email = get_email_by_token(data.token)
-    _store_calculation(email, data, result, marker_breakdown)
+    saved, save_error = _store_calculation(email, data, result, marker_breakdown)
+
+    result["persistence"] = {
+        "saved": saved,
+        "email": email,
+        "error": save_error,
+    }
 
     return result
 
@@ -211,5 +226,5 @@ async def history(
             .execute()
         )
         return {"items": response.data or []}
-    except Exception:
-        return {"items": []}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"History query failed: {str(exc)}")
