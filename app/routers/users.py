@@ -1,3 +1,8 @@
+import json
+import os
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException
@@ -24,6 +29,10 @@ class LoginRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     email: str
     password: str
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str
 
 
 def _db_get_user(email: str) -> dict[str, object] | None:
@@ -86,6 +95,35 @@ def _db_update_password(email: str, password: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _verify_google_credential(credential: str) -> dict[str, object]:
+    url = f"https://oauth2.googleapis.com/tokeninfo?{urlencode({'id_token': credential})}"
+    try:
+        with urlopen(url, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except URLError as exc:
+        raise HTTPException(status_code=401, detail="Google-Login aktuell nicht verfügbar") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Ungültiges Google-Token") from exc
+
+    email = str(payload.get("email", "")).strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Google-Konto enthält keine E-Mail")
+
+    if str(payload.get("email_verified", "")).lower() not in {"true", "1"}:
+        raise HTTPException(status_code=401, detail="Google-E-Mail ist nicht verifiziert")
+
+    expected_audience = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    audience = str(payload.get("aud", "")).strip()
+    if expected_audience and audience != expected_audience:
+        raise HTTPException(status_code=401, detail="Google-Token ist für eine andere App ausgestellt")
+
+    full_name = str(payload.get("name", "")).strip()
+    if not full_name:
+        full_name = email.split("@", 1)[0]
+
+    return {"email": email, "full_name": full_name}
 
 
 def _normalize_user_record(record: dict[str, object]) -> dict[str, object]:
@@ -165,6 +203,35 @@ async def login(req: LoginRequest):
 
     if not user or user.get("password") != req.password:
         raise HTTPException(status_code=401, detail="Ungueltige E-Mail oder Passwort")
+
+    token = f"vt_{uuid4().hex}"
+    token_to_email[token] = email
+
+    return {
+        "access_token": token,
+        "message": "Login erfolgreich",
+        "email": email,
+        "premium": bool(user.get("premium", False)),
+    }
+
+
+@router.post("/google-login")
+async def google_login(req: GoogleLoginRequest):
+    verified = _verify_google_credential(req.credential)
+    email = str(verified["email"])
+    full_name = str(verified["full_name"])
+
+    user = _get_user(email)
+    if not user:
+        created_in_db = _db_create_user(email, full_name, "google_oauth")
+        users_store[email] = {
+            "password": "google_oauth",
+            "full_name": full_name,
+            "premium": False,
+        }
+        if not created_in_db:
+            users_store[email]["storage"] = "memory"
+        user = users_store[email]
 
     token = f"vt_{uuid4().hex}"
     token_to_email[token] = email
