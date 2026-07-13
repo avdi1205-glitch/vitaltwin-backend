@@ -14,31 +14,67 @@ CALC_TABLE = "vt_twin_calculations"
 DEFAULT_MARKER_CONFIG: dict[str, dict[str, Any]] = {
     "hba1c": {
         "lower_bound": 5.0,
-        "upper_bound": 5.0,
+        "upper_bound": 5.6,
         "penalty_below": 0.0,
         "penalty_above": 2.8,
+        "unit": "%",
+        "target_min": 5.0,
+        "target_max": 5.6,
+        "warn_min": 4.6,
+        "warn_max": 6.4,
+        "source_name": "ADA Standards of Care",
+        "source_url": "https://diabetesjournals.org/care/issue/47/Supplement_1",
+        "evidence_level": "hoch",
+        "population_note": "Erwachsene ohne Schwangerschaft",
         "recommendation": "HbA1c optimieren: Fokus auf stabile Blutzuckerwerte.",
     },
     "crp": {
-        "lower_bound": 1.0,
+        "lower_bound": 0.0,
         "upper_bound": 1.0,
         "penalty_below": 0.0,
         "penalty_above": 3.5,
-        "recommendation": "Entzuendungsmanagement verbessern (Ernaehrung, Schlaf, Stress).",
+        "unit": "mg/L",
+        "target_min": 0.0,
+        "target_max": 1.0,
+        "warn_min": 0.0,
+        "warn_max": 3.0,
+        "source_name": "AHA/CDC Risikoklassifikation hs-CRP",
+        "source_url": "https://www.ahajournals.org",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, kardiovaskuläre Risikoeinschätzung",
+        "recommendation": "Entzündungsmanagement verbessern (Ernährung, Schlaf, Stress).",
     },
     "vitamin_d": {
-        "lower_bound": 40.0,
-        "upper_bound": 120.0,
+        "lower_bound": 30.0,
+        "upper_bound": 60.0,
         "penalty_below": 0.6,
         "penalty_above": 0.0,
-        "recommendation": "Vitamin-D-Status regelmaessig kontrollieren und optimieren.",
+        "unit": "ng/mL",
+        "target_min": 30.0,
+        "target_max": 50.0,
+        "warn_min": 20.0,
+        "warn_max": 80.0,
+        "source_name": "Endocrine Society Guideline",
+        "source_url": "https://www.endocrine.org",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, Serum 25(OH)D",
+        "recommendation": "Vitamin-D-Status regelmäßig kontrollieren und optimieren.",
     },
     "apob": {
-        "lower_bound": 70.0,
-        "upper_bound": 70.0,
+        "lower_bound": 0.0,
+        "upper_bound": 90.0,
         "penalty_below": 0.0,
         "penalty_above": 0.4,
-        "recommendation": "ApoB senken durch Lebensstil und aerztlich begleitete Strategie.",
+        "unit": "mg/dL",
+        "target_min": 0.0,
+        "target_max": 80.0,
+        "warn_min": 0.0,
+        "warn_max": 110.0,
+        "source_name": "ESC/EAS Dyslipidämie-Leitlinie",
+        "source_url": "https://www.escardio.org",
+        "evidence_level": "hoch",
+        "population_note": "Erwachsene, Prävention",
+        "recommendation": "ApoB senken durch Lebensstil und ärztlich begleitete Strategie.",
     },
 }
 
@@ -47,6 +83,19 @@ class MarkerBreakdown(BaseModel):
     marker: str
     value: float
     contribution: float
+
+
+class MarkerReferenceResponse(BaseModel):
+    marker: str
+    unit: str
+    target_min: float | None = None
+    target_max: float | None = None
+    warn_min: float | None = None
+    warn_max: float | None = None
+    source_name: str
+    source_url: str
+    evidence_level: str
+    population_note: str
 
 class TwinInput(BaseModel):
     age: int
@@ -62,7 +111,7 @@ def _load_marker_config() -> dict[str, dict[str, Any]]:
     try:
         response = (
             supabase.table(MARKER_TABLE)
-            .select("marker,lower_bound,upper_bound,penalty_below,penalty_above,recommendation")
+            .select("marker,lower_bound,upper_bound,penalty_below,penalty_above,unit,target_min,target_max,warn_min,warn_max,source_name,source_url,evidence_level,population_note,recommendation")
             .execute()
         )
         rows = response.data or []
@@ -79,6 +128,15 @@ def _load_marker_config() -> dict[str, dict[str, Any]]:
                 "upper_bound": float(row.get("upper_bound", 0.0)),
                 "penalty_below": float(row.get("penalty_below", 0.0)),
                 "penalty_above": float(row.get("penalty_above", 0.0)),
+                "unit": str(row.get("unit", "")),
+                "target_min": row.get("target_min"),
+                "target_max": row.get("target_max"),
+                "warn_min": row.get("warn_min"),
+                "warn_max": row.get("warn_max"),
+                "source_name": str(row.get("source_name", "")),
+                "source_url": str(row.get("source_url", "")),
+                "evidence_level": str(row.get("evidence_level", "orientierend")),
+                "population_note": str(row.get("population_note", "Erwachsene")),
                 "recommendation": row.get("recommendation") or DEFAULT_MARKER_CONFIG.get(marker, {}).get("recommendation", "Marker optimieren."),
             }
 
@@ -153,6 +211,27 @@ def _store_calculation(
         print(f"Failed to store calculation history: {exc}")
         return
 
+
+def _build_marker_references(config: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    references: list[dict[str, Any]] = []
+    for marker in sorted(config.keys()):
+        ref = config[marker]
+        references.append(
+            MarkerReferenceResponse(
+                marker=marker,
+                unit=str(ref.get("unit", "")),
+                target_min=ref.get("target_min"),
+                target_max=ref.get("target_max"),
+                warn_min=ref.get("warn_min"),
+                warn_max=ref.get("warn_max"),
+                source_name=str(ref.get("source_name", "Unbekannte Quelle")),
+                source_url=str(ref.get("source_url", "")),
+                evidence_level=str(ref.get("evidence_level", "orientierend")),
+                population_note=str(ref.get("population_note", "Erwachsene")),
+            ).model_dump()
+        )
+    return references
+
 @router.post("/calculate")
 async def calculate(data: TwinInput):
     marker_config = _load_marker_config()
@@ -185,6 +264,11 @@ async def calculate(data: TwinInput):
             "optimiert": round(bio_age - 5.5, 1),
             "aggressiv": round(bio_age - 9.0, 1),
         },
+        "methodik": {
+            "typ": "Wellness-Orientierung",
+            "hinweis": "Kein medizinisches Produkt. Keine Diagnose oder Therapieempfehlung.",
+        },
+        "marker_references": _build_marker_references(marker_config),
         "empfehlungen": recommendations,
         "marker_breakdown": marker_breakdown,
     }
@@ -222,3 +306,15 @@ async def history(
         return {"items": response.data or []}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"History query failed: {str(exc)}")
+
+
+@router.get("/references")
+async def references():
+    marker_config = _load_marker_config()
+    return {
+        "items": _build_marker_references(marker_config),
+        "methodik": {
+            "typ": "Wellness-Orientierung",
+            "hinweis": "Die Referenzdaten dienen der Gesundheitsorientierung und ersetzen keine medizinische Diagnostik.",
+        },
+    }
