@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from uuid import uuid4
 
+import bcrypt
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
@@ -29,9 +30,9 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class ResetPasswordRequest(BaseModel):
-    email: str
-    password: str
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 
 class GoogleLoginRequest(BaseModel):
@@ -42,6 +43,29 @@ class FeedbackRequest(BaseModel):
     score: int
     message: str
     source: str | None = None
+
+
+_BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _is_hashed_password(value: str) -> bool:
+    return value.startswith(_BCRYPT_PREFIXES)
+
+
+def _verify_password(plain_password: str, stored_password: str) -> bool:
+    if not stored_password:
+        return False
+    if _is_hashed_password(stored_password):
+        try:
+            return bcrypt.checkpw(plain_password.encode("utf-8"), stored_password.encode("utf-8"))
+        except ValueError:
+            return False
+    # Legacy fallback for accounts created before password hashing was introduced.
+    return plain_password == stored_password
 
 
 def _db_get_user(email: str) -> dict[str, object] | None:
@@ -235,10 +259,14 @@ async def register(req: RegisterRequest):
     if _get_user(email):
         raise HTTPException(status_code=400, detail="E-Mail ist bereits registriert")
 
-    created_in_db = _db_create_user(email, req.full_name, req.password)
+    if len(req.password) < 8:
+        raise HTTPException(status_code=400, detail="Passwort muss mindestens 8 Zeichen haben")
+
+    hashed_password = _hash_password(req.password)
+    created_in_db = _db_create_user(email, req.full_name, hashed_password)
 
     users_store[email] = {
-        "password": req.password,
+        "password": hashed_password,
         "full_name": req.full_name,
         "premium": False,
     }
@@ -254,8 +282,15 @@ async def login(req: LoginRequest):
     email = req.email.strip().lower()
     user = _get_user(email)
 
-    if not user or user.get("password") != req.password:
+    stored_password = str(user.get("password", "")) if user else ""
+    if not user or not _verify_password(req.password, stored_password):
         raise HTTPException(status_code=401, detail="Ungueltige E-Mail oder Passwort")
+
+    if not _is_hashed_password(stored_password):
+        # Transparently migrate legacy plaintext passwords to a bcrypt hash on next login.
+        migrated_hash = _hash_password(req.password)
+        user["password"] = migrated_hash
+        _db_update_password(email, migrated_hash)
 
     token = f"vt_{uuid4().hex}"
     token_to_email[token] = email
@@ -276,9 +311,11 @@ async def google_login(req: GoogleLoginRequest):
 
     user = _get_user(email)
     if not user:
-        created_in_db = _db_create_user(email, full_name, "google_oauth")
+        # Random unguessable sentinel: Google-linked accounts never log in via password form.
+        unusable_password_hash = _hash_password(uuid4().hex)
+        created_in_db = _db_create_user(email, full_name, unusable_password_hash)
         users_store[email] = {
-            "password": "google_oauth",
+            "password": unusable_password_hash,
             "full_name": full_name,
             "premium": False,
         }
@@ -297,15 +334,29 @@ async def google_login(req: GoogleLoginRequest):
     }
 
 
-@router.post("/reset-password")
-async def reset_password(req: ResetPasswordRequest):
-    email = req.email.strip().lower()
+@router.post("/change-password")
+async def change_password(req: ChangePasswordRequest, authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Nicht eingeloggt")
+
+    token = authorization.split(" ", 1)[1].strip()
+    email = get_email_by_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Session abgelaufen")
+
     user = _get_user(email)
-
     if not user:
-        raise HTTPException(status_code=404, detail="Kein Konto mit dieser E-Mail gefunden")
+        raise HTTPException(status_code=404, detail="User nicht gefunden")
 
-    updated = set_password_by_email(email, req.password)
+    stored_password = str(user.get("password", ""))
+    if not _verify_password(req.current_password, stored_password):
+        raise HTTPException(status_code=401, detail="Aktuelles Passwort ist falsch")
+
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Neues Passwort muss mindestens 8 Zeichen haben")
+
+    new_hash = _hash_password(req.new_password)
+    updated = set_password_by_email(email, new_hash)
     if not updated:
         raise HTTPException(status_code=500, detail="Passwort konnte nicht aktualisiert werden")
 
