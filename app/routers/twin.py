@@ -104,7 +104,17 @@ class TwinInput(BaseModel):
     crp: float = 1.2
     vitamin_d: float = 40.0
     apob: float = 80.0
+    family_context: list[str] = []
     token: str | None = None
+
+
+# Wellness-only personalization: which existing marker recommendations to prioritize
+# based on an optional, self-reported family context. This never changes the
+# biological-age calculation itself and adds no new health claims or risk scoring.
+FAMILY_CONTEXT_MARKER_FOCUS: dict[str, list[str]] = {
+    "herz_kreislauf": ["apob", "crp"],
+    "stoffwechsel": ["hba1c"],
+}
 
 
 def _load_marker_config() -> dict[str, dict[str, Any]]:
@@ -162,8 +172,20 @@ def _calc_marker_contribution(value: float, marker_config: dict[str, Any]) -> fl
     return round(contribution, 3)
 
 
-def _build_recommendations(marker_breakdown: list[dict[str, Any]], config: dict[str, dict[str, Any]]) -> list[str]:
-    sorted_markers = sorted(marker_breakdown, key=lambda item: item["contribution"], reverse=True)
+def _build_recommendations(
+    marker_breakdown: list[dict[str, Any]],
+    config: dict[str, dict[str, Any]],
+    family_context: list[str] | None = None,
+) -> list[str]:
+    focus_markers: set[str] = set()
+    for context_item in family_context or []:
+        focus_markers.update(FAMILY_CONTEXT_MARKER_FOCUS.get(context_item, []))
+
+    sorted_markers = sorted(
+        marker_breakdown,
+        key=lambda item: (item["marker"] in focus_markers, item["contribution"]),
+        reverse=True,
+    )
     recommendations: list[str] = []
 
     for item in sorted_markers:
@@ -269,7 +291,7 @@ async def calculate(data: TwinInput):
         )
 
     bio_age = float(data.age) + sum(item["contribution"] for item in marker_breakdown)
-    recommendations = _build_recommendations(marker_breakdown, marker_config)
+    recommendations = _build_recommendations(marker_breakdown, marker_config, data.family_context)
 
     email = get_email_by_token(data.token)
     is_premium = bool(email) and is_premium_by_email(email)
@@ -305,6 +327,11 @@ async def calculate(data: TwinInput):
         "marker_references": _build_marker_references(marker_config) if is_premium else [],
         "empfehlungen": recommendations if is_premium else starter_recommendations,
         "marker_breakdown": marker_breakdown,
+        "familienkontext_hinweis": (
+            "Deine Empfehlungen wurden auf Basis deines Familienkontexts priorisiert (Wellness-Orientierung, keine Diagnose)."
+            if is_premium and data.family_context
+            else None
+        ),
     }
 
     _store_calculation(email, data, result, marker_breakdown)
