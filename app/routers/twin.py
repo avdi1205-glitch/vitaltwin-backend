@@ -26,7 +26,10 @@ DEFAULT_MARKER_CONFIG: dict[str, dict[str, Any]] = {
         "source_url": "https://diabetesjournals.org/care/issue/47/Supplement_1",
         "evidence_level": "hoch",
         "population_note": "Erwachsene ohne Schwangerschaft",
-        "recommendation": "HbA1c optimieren: Fokus auf stabile Blutzuckerwerte.",
+        "recommendations": [
+            "HbA1c optimieren: Fokus auf stabile Blutzuckerwerte durch regelmäßige Mahlzeitenrhythmen.",
+            "Kohlenhydratqualität verbessern: mehr Ballaststoffe, weniger stark verarbeitete Produkte.",
+        ],
     },
     "crp": {
         "lower_bound": 0.0,
@@ -42,7 +45,10 @@ DEFAULT_MARKER_CONFIG: dict[str, dict[str, Any]] = {
         "source_url": "https://www.ahajournals.org",
         "evidence_level": "mittel",
         "population_note": "Erwachsene, kardiovaskuläre Risikoeinschätzung",
-        "recommendation": "Entzündungsmanagement verbessern (Ernährung, Schlaf, Stress).",
+        "recommendations": [
+            "Entzündungsmanagement verbessern: Ernährung, Schlaf und Stress im Blick behalten.",
+            "Regelmäßige moderate Bewegung kann helfen, niedriggradige Entzündungswerte zu senken.",
+        ],
     },
     "vitamin_d": {
         "lower_bound": 30.0,
@@ -58,7 +64,10 @@ DEFAULT_MARKER_CONFIG: dict[str, dict[str, Any]] = {
         "source_url": "https://www.endocrine.org",
         "evidence_level": "mittel",
         "population_note": "Erwachsene, Serum 25(OH)D",
-        "recommendation": "Vitamin-D-Status regelmäßig kontrollieren und optimieren.",
+        "recommendations": [
+            "Vitamin-D-Status regelmäßig kontrollieren und optimieren.",
+            "Zeit im Freien und Sonnenlichtexposition im Alltag einplanen, soweit möglich.",
+        ],
     },
     "apob": {
         "lower_bound": 0.0,
@@ -74,7 +83,276 @@ DEFAULT_MARKER_CONFIG: dict[str, dict[str, Any]] = {
         "source_url": "https://www.escardio.org",
         "evidence_level": "hoch",
         "population_note": "Erwachsene, Prävention",
-        "recommendation": "ApoB senken durch Lebensstil und ärztlich begleitete Strategie.",
+        "recommendations": [
+            "ApoB senken durch Lebensstil und ärztlich begleitete Strategie.",
+            "Gesättigte Fette reduzieren, Ballaststoffe und ungesättigte Fette erhöhen.",
+        ],
+    },
+    "fasting_glucose": {
+        "lower_bound": 70.0,
+        "upper_bound": 99.0,
+        "penalty_below": 0.0,
+        "penalty_above": 0.05,
+        "unit": "mg/dL",
+        "target_min": 70.0,
+        "target_max": 99.0,
+        "warn_min": 60.0,
+        "warn_max": 125.0,
+        "source_name": "ADA Standards of Care",
+        "source_url": "https://diabetesjournals.org/care/issue/47/Supplement_1",
+        "evidence_level": "hoch",
+        "population_note": "Erwachsene, nüchtern gemessen",
+        "recommendations": [
+            "Nüchternglukose im Blick behalten: regelmäßige Bewegung nach den Mahlzeiten hilft.",
+            "Zuckerhaltige Getränke und schnelle Kohlenhydrate reduzieren.",
+        ],
+    },
+    "hdl": {
+        "lower_bound": 45.0,
+        "upper_bound": 200.0,
+        "penalty_below": 0.05,
+        "penalty_above": 0.0,
+        "unit": "mg/dL",
+        "target_min": 45.0,
+        "target_max": None,
+        "warn_min": 35.0,
+        "warn_max": None,
+        "source_name": "ESC/EAS Dyslipidämie-Leitlinie",
+        "source_url": "https://www.escardio.org",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, vereinfachter Richtwert (nicht geschlechtsspezifisch differenziert)",
+        "recommendations": [
+            "HDL-Cholesterin unterstützen: regelmäßige Ausdauerbewegung ist gut untersucht.",
+            "Ungesättigte Fette (z. B. Olivenöl, Nüsse, Fisch) bevorzugen.",
+        ],
+    },
+    "triglycerides": {
+        "lower_bound": 0.0,
+        "upper_bound": 150.0,
+        "penalty_below": 0.0,
+        "penalty_above": 0.02,
+        "unit": "mg/dL",
+        "target_min": 0.0,
+        "target_max": 150.0,
+        "warn_min": 0.0,
+        "warn_max": 200.0,
+        "source_name": "ESC/EAS Dyslipidämie-Leitlinie",
+        "source_url": "https://www.escardio.org",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, nüchtern gemessen",
+        "recommendations": [
+            "Triglyceride senken: Alkohol und zugesetzten Zucker reduzieren.",
+            "Omega-3-reiche Lebensmittel wie fetten Fisch regelmäßig einplanen.",
+        ],
+    },
+    "homocysteine": {
+        "lower_bound": 0.0,
+        "upper_bound": 10.0,
+        "penalty_below": 0.0,
+        "penalty_above": 0.15,
+        "unit": "µmol/L",
+        "target_min": 0.0,
+        "target_max": 10.0,
+        "warn_min": 0.0,
+        "warn_max": 15.0,
+        "source_name": "AHA Scientific Statement Homocysteine",
+        "source_url": "https://www.ahajournals.org",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, orientierender Richtwert",
+        "recommendations": [
+            "B-Vitamin-reiche Ernährung (Blattgemüse, Vollkorn, Hülsenfrüchte) im Blick behalten.",
+            "Bei dauerhaft erhöhten Werten ärztliche Abklärung der Ursache empfehlenswert.",
+        ],
+    },
+    "tsh": {
+        "lower_bound": 0.5,
+        "upper_bound": 2.5,
+        "penalty_below": 0.3,
+        "penalty_above": 0.3,
+        "unit": "mIU/L",
+        "target_min": 0.5,
+        "target_max": 2.5,
+        "warn_min": 0.3,
+        "warn_max": 4.5,
+        "source_name": "Deutsche Gesellschaft für Endokrinologie",
+        "source_url": "https://www.endokrinologie.net",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, orientierender Wellness-Richtwert (kein Diagnosewert)",
+        "recommendations": [
+            "TSH-Wert bei Auffälligkeiten ärztlich einordnen lassen, nicht selbst behandeln.",
+            "Regelmäßiger Schlaf-Wach-Rhythmus unterstützt die hormonelle Balance allgemein.",
+        ],
+    },
+    "ferritin": {
+        "lower_bound": 30.0,
+        "upper_bound": 150.0,
+        "penalty_below": 0.02,
+        "penalty_above": 0.01,
+        "unit": "ng/mL",
+        "target_min": 30.0,
+        "target_max": 150.0,
+        "warn_min": 15.0,
+        "warn_max": 300.0,
+        "source_name": "WHO Referenzbereiche Eisenstatus",
+        "source_url": "https://www.who.int",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, vereinfachter Richtwert",
+        "recommendations": [
+            "Eisenreiche und eisenhemmende/-fördernde Lebensmittelkombinationen beachten.",
+            "Bei stark abweichenden Werten ärztliche Ursachenklärung statt Selbstsupplementierung.",
+        ],
+    },
+    "vitamin_b12": {
+        "lower_bound": 400.0,
+        "upper_bound": 900.0,
+        "penalty_below": 0.01,
+        "penalty_above": 0.0,
+        "unit": "pg/mL",
+        "target_min": 400.0,
+        "target_max": 900.0,
+        "warn_min": 200.0,
+        "warn_max": None,
+        "source_name": "Endocrine Society / DGE Referenzwerte",
+        "source_url": "https://www.dge.de",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, funktioneller Richtwert oberhalb des reinen Laborminimums",
+        "recommendations": [
+            "B12-Quellen (bei veganer/vegetarischer Ernährung besonders beachten) regelmäßig einplanen.",
+            "Bei dauerhaft niedrigen Werten ärztliche Abklärung empfehlenswert.",
+        ],
+    },
+    "omega3_index": {
+        "lower_bound": 8.0,
+        "upper_bound": 20.0,
+        "penalty_below": 0.15,
+        "penalty_above": 0.0,
+        "unit": "%",
+        "target_min": 8.0,
+        "target_max": None,
+        "warn_min": 4.0,
+        "warn_max": None,
+        "source_name": "Omega-3 Index Studienlage (Harris et al.)",
+        "source_url": "https://www.omega-3index.com",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, Erythrozytenmembran-Messung",
+        "recommendations": [
+            "Fetten Fisch (Lachs, Makrele, Hering) 2x pro Woche einplanen oder Omega-3-Quelle prüfen.",
+            "Verhältnis von Omega-6 zu Omega-3 in der Ernährung im Blick behalten.",
+        ],
+    },
+    "resting_heart_rate": {
+        "lower_bound": 50.0,
+        "upper_bound": 70.0,
+        "penalty_below": 0.0,
+        "penalty_above": 0.08,
+        "unit": "bpm",
+        "target_min": 50.0,
+        "target_max": 70.0,
+        "warn_min": 40.0,
+        "warn_max": 90.0,
+        "source_name": "AHA Empfehlungen Ruhepuls",
+        "source_url": "https://www.heart.org",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, morgens im Ruhezustand gemessen",
+        "recommendations": [
+            "Regelmäßiges Ausdauertraining senkt den Ruhepuls bei vielen Menschen nachweislich.",
+            "Schlafqualität und Erholung beeinflussen den Ruhepuls spürbar.",
+        ],
+    },
+    "blood_pressure_systolic": {
+        "lower_bound": 90.0,
+        "upper_bound": 120.0,
+        "penalty_below": 0.02,
+        "penalty_above": 0.05,
+        "unit": "mmHg",
+        "target_min": 90.0,
+        "target_max": 120.0,
+        "warn_min": 80.0,
+        "warn_max": 140.0,
+        "source_name": "ESC/ESH Blutdruckleitlinie",
+        "source_url": "https://www.escardio.org",
+        "evidence_level": "hoch",
+        "population_note": "Erwachsene, in Ruhe gemessen",
+        "recommendations": [
+            "Salzarme, kaliumreiche Ernährung kann den Blutdruck unterstützen.",
+            "Regelmäßige Bewegung und Stressreduktion sind gut belegte Blutdruck-Hebel.",
+        ],
+    },
+    "blood_pressure_diastolic": {
+        "lower_bound": 60.0,
+        "upper_bound": 80.0,
+        "penalty_below": 0.02,
+        "penalty_above": 0.08,
+        "unit": "mmHg",
+        "target_min": 60.0,
+        "target_max": 80.0,
+        "warn_min": 50.0,
+        "warn_max": 90.0,
+        "source_name": "ESC/ESH Blutdruckleitlinie",
+        "source_url": "https://www.escardio.org",
+        "evidence_level": "hoch",
+        "population_note": "Erwachsene, in Ruhe gemessen",
+        "recommendations": [
+            "Regelmäßige Blutdruckmessung zu ähnlichen Tageszeiten für bessere Vergleichbarkeit.",
+            "Alkoholkonsum reduzieren kann den diastolischen Wert positiv beeinflussen.",
+        ],
+    },
+    "waist_circumference": {
+        "lower_bound": 0.0,
+        "upper_bound": 94.0,
+        "penalty_below": 0.0,
+        "penalty_above": 0.05,
+        "unit": "cm",
+        "target_min": 0.0,
+        "target_max": 94.0,
+        "warn_min": 0.0,
+        "warn_max": 102.0,
+        "source_name": "IDF Konsensus Taillenumfang",
+        "source_url": "https://www.idf.org",
+        "evidence_level": "mittel",
+        "population_note": "Vereinfachter Richtwert, nicht geschlechtsspezifisch differenziert",
+        "recommendations": [
+            "Taillenumfang regelmäßig zur gleichen Tageszeit messen für Vergleichbarkeit.",
+            "Kombination aus Ernährungsanpassung und Krafttraining wirkt oft am nachhaltigsten.",
+        ],
+    },
+    "sleep_hours": {
+        "lower_bound": 7.0,
+        "upper_bound": 9.0,
+        "penalty_below": 0.3,
+        "penalty_above": 0.1,
+        "unit": "h",
+        "target_min": 7.0,
+        "target_max": 9.0,
+        "warn_min": 5.0,
+        "warn_max": 10.0,
+        "source_name": "National Sleep Foundation / AASM",
+        "source_url": "https://www.sleepfoundation.org",
+        "evidence_level": "hoch",
+        "population_note": "Erwachsene, durchschnittliche Schlafdauer pro Nacht",
+        "recommendations": [
+            "Feste Schlafenszeiten und Bildschirmpause vor dem Schlafengehen einplanen.",
+            "Schlafzimmer kühl, dunkel und ruhig halten für bessere Schlafqualität.",
+        ],
+    },
+    "grip_strength": {
+        "lower_bound": 35.0,
+        "upper_bound": 100.0,
+        "penalty_below": 0.03,
+        "penalty_above": 0.0,
+        "unit": "kg",
+        "target_min": 35.0,
+        "target_max": None,
+        "warn_min": 20.0,
+        "warn_max": None,
+        "source_name": "Studienlage Griffkraft & Langlebigkeit (Leong et al.)",
+        "source_url": "https://www.thelancet.com",
+        "evidence_level": "mittel",
+        "population_note": "Erwachsene, vereinfachter Richtwert (nicht alters-/geschlechtsspezifisch)",
+        "recommendations": [
+            "Regelmäßiges Krafttraining, insbesondere Grifftraining, kann die Griffkraft verbessern.",
+            "Griffkraft gilt in Studien als Indikator für allgemeine Muskelkraft und Vitalität.",
+        ],
     },
 }
 
@@ -104,6 +382,20 @@ class TwinInput(BaseModel):
     crp: float = 1.2
     vitamin_d: float = 40.0
     apob: float = 80.0
+    fasting_glucose: float = 92.0
+    hdl: float = 55.0
+    triglycerides: float = 110.0
+    homocysteine: float = 9.0
+    tsh: float = 1.8
+    ferritin: float = 90.0
+    vitamin_b12: float = 500.0
+    omega3_index: float = 6.0
+    resting_heart_rate: float = 65.0
+    blood_pressure_systolic: float = 122.0
+    blood_pressure_diastolic: float = 78.0
+    waist_circumference: float = 88.0
+    sleep_hours: float = 6.8
+    grip_strength: float = 35.0
     family_context: list[str] = []
     token: str | None = None
 
@@ -112,8 +404,17 @@ class TwinInput(BaseModel):
 # based on an optional, self-reported family context. This never changes the
 # biological-age calculation itself and adds no new health claims or risk scoring.
 FAMILY_CONTEXT_MARKER_FOCUS: dict[str, list[str]] = {
-    "herz_kreislauf": ["apob", "crp"],
-    "stoffwechsel": ["hba1c"],
+    "herz_kreislauf": [
+        "apob",
+        "crp",
+        "hdl",
+        "triglycerides",
+        "blood_pressure_systolic",
+        "blood_pressure_diastolic",
+        "resting_heart_rate",
+        "homocysteine",
+    ],
+    "stoffwechsel": ["hba1c", "fasting_glucose", "triglycerides", "waist_circumference"],
 }
 
 
@@ -133,6 +434,7 @@ def _load_marker_config() -> dict[str, dict[str, Any]]:
             marker = str(row.get("marker", "")).strip().lower()
             if not marker:
                 continue
+            db_recommendation = row.get("recommendation")
             config[marker] = {
                 "lower_bound": float(row.get("lower_bound", 0.0)),
                 "upper_bound": float(row.get("upper_bound", 0.0)),
@@ -147,7 +449,7 @@ def _load_marker_config() -> dict[str, dict[str, Any]]:
                 "source_url": str(row.get("source_url", "")),
                 "evidence_level": str(row.get("evidence_level", "orientierend")),
                 "population_note": str(row.get("population_note", "Erwachsene")),
-                "recommendation": row.get("recommendation") or DEFAULT_MARKER_CONFIG.get(marker, {}).get("recommendation", "Marker optimieren."),
+                "recommendations": [db_recommendation] if db_recommendation else DEFAULT_MARKER_CONFIG.get(marker, {}).get("recommendations", ["Marker optimieren."]),
             }
 
         for marker, defaults in DEFAULT_MARKER_CONFIG.items():
@@ -192,15 +494,16 @@ def _build_recommendations(
         if item["contribution"] <= 0:
             continue
         marker = item["marker"]
-        recommendation = str(config.get(marker, {}).get("recommendation", "Marker optimieren."))
-        recommendations.append(recommendation)
-        if len(recommendations) >= 3:
+        tips = config.get(marker, {}).get("recommendations") or ["Marker optimieren."]
+        for tip in tips[:2]:
+            recommendations.append(str(tip))
+        if len(recommendations) >= 6:
             break
 
     if not recommendations:
         recommendations.append("Marker sind stabil. Werte regelmäßig weiter tracken.")
 
-    return recommendations
+    return recommendations[:6]
 
 
 def _store_calculation(
@@ -277,6 +580,20 @@ async def calculate(data: TwinInput):
         "crp": data.crp,
         "vitamin_d": data.vitamin_d,
         "apob": data.apob,
+        "fasting_glucose": data.fasting_glucose,
+        "hdl": data.hdl,
+        "triglycerides": data.triglycerides,
+        "homocysteine": data.homocysteine,
+        "tsh": data.tsh,
+        "ferritin": data.ferritin,
+        "vitamin_b12": data.vitamin_b12,
+        "omega3_index": data.omega3_index,
+        "resting_heart_rate": data.resting_heart_rate,
+        "blood_pressure_systolic": data.blood_pressure_systolic,
+        "blood_pressure_diastolic": data.blood_pressure_diastolic,
+        "waist_circumference": data.waist_circumference,
+        "sleep_hours": data.sleep_hours,
+        "grip_strength": data.grip_strength,
     }
 
     marker_breakdown: list[dict[str, Any]] = []
