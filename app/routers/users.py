@@ -1,11 +1,13 @@
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from uuid import uuid4
 
 import bcrypt
+import jwt
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
@@ -14,11 +16,32 @@ from ..core.supabase import supabase
 router = APIRouter()
 
 users_store: dict[str, dict[str, object]] = {}
-token_to_email: dict[str, str] = {}
 feedback_store: list[dict[str, object]] = []
 USER_TABLE = "vt_users"
 FEEDBACK_TABLE = "vt_user_feedback"
 CALC_TABLE = "vt_twin_calculations"
+
+# Stateless session tokens (JWT): the token itself encodes and proves the
+# identity, so login sessions survive backend restarts and work correctly
+# across multiple backend instances (no shared in-memory token store needed).
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_DAYS = 30
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "").strip()
+if not JWT_SECRET_KEY:
+    # Insecure fallback so local/dev setups keep working without extra config.
+    # Set JWT_SECRET_KEY in production so tokens stay valid across deploys.
+    JWT_SECRET_KEY = "dev-insecure-jwt-secret-change-me"
+    print("WARNING: JWT_SECRET_KEY is not set. Using an insecure development fallback.")
+
+
+def _create_access_token(email: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": email,
+        "iat": now,
+        "exp": now + timedelta(days=JWT_EXPIRY_DAYS),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 class RegisterRequest(BaseModel):
     email: str
@@ -244,7 +267,12 @@ def _get_user(email: str) -> dict[str, object] | None:
 def get_email_by_token(token: str | None) -> str | None:
     if not token:
         return None
-    return token_to_email.get(token)
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        return None
+    email = payload.get("sub")
+    return str(email) if email else None
 
 
 def set_premium_by_email(email: str, premium: bool) -> bool:
@@ -319,8 +347,7 @@ async def login(req: LoginRequest):
         user["password"] = migrated_hash
         _db_update_password(email, migrated_hash)
 
-    token = f"vt_{uuid4().hex}"
-    token_to_email[token] = email
+    token = _create_access_token(email)
 
     return {
         "access_token": token,
@@ -350,8 +377,7 @@ async def google_login(req: GoogleLoginRequest):
             users_store[email]["storage"] = "memory"
         user = users_store[email]
 
-    token = f"vt_{uuid4().hex}"
-    token_to_email[token] = email
+    token = _create_access_token(email)
 
     return {
         "access_token": token,
