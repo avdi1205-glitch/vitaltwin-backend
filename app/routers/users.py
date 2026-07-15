@@ -35,6 +35,15 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class RequestPasswordResetRequest(BaseModel):
+    email: str
+
+
+class CompletePasswordResetRequest(BaseModel):
+    access_token: str
+    new_password: str
+
+
 class GoogleLoginRequest(BaseModel):
     credential: str
 
@@ -66,6 +75,21 @@ def _verify_password(plain_password: str, stored_password: str) -> bool:
             return False
     # Legacy fallback for accounts created before password hashing was introduced.
     return plain_password == stored_password
+
+
+def _ensure_supabase_auth_shadow_user(email: str) -> None:
+    """Best-effort: make sure Supabase Auth knows this email so it can send reset emails.
+
+    Our own login system stores credentials in the vt_users table, not Supabase Auth.
+    Supabase can only send password-reset emails for accounts that exist in its own
+    Auth store, so we lazily create a shadow account there. The random password set
+    here is never used for anything: our real login always checks vt_users.
+    """
+    try:
+        supabase.auth.sign_up({"email": email, "password": f"{uuid4().hex}Aa1!"})
+    except Exception:
+        # Already exists in Supabase Auth (expected for repeat requests) or sign-up disabled.
+        pass
 
 
 def _db_get_user(email: str) -> dict[str, object] | None:
@@ -275,6 +299,9 @@ async def register(req: RegisterRequest):
         # Keep demo fallback behavior if Supabase table is not available yet.
         users_store[email]["storage"] = "memory"
 
+    # Best-effort: enables the forgot-password email flow via Supabase Auth later on.
+    _ensure_supabase_auth_shadow_user(email)
+
     return {"message": "Registrierung erfolgreich", "email": email}
 
 @router.post("/login")
@@ -415,6 +442,58 @@ async def activate_beta(authorization: str | None = Header(default=None)):
         "message": "Beta-Zugang kostenlos aktiviert. Danke, dass du als Tester dabei bist.",
         "premium": True,
     }
+
+
+@router.post("/request-password-reset")
+async def request_password_reset(req: RequestPasswordResetRequest):
+    email = req.email.strip().lower()
+    generic_response = {
+        "message": "Falls ein Konto mit dieser E-Mail existiert, haben wir eine E-Mail zum Zurücksetzen des Passworts gesendet.",
+    }
+
+    if not _get_user(email):
+        # Do not reveal whether the account exists.
+        return generic_response
+
+    frontend_base_url = os.getenv("FRONTEND_BASE_URL", "https://www.vitaltwin.de").rstrip("/")
+    redirect_to = f"{frontend_base_url}/passwort-bestaetigen"
+
+    _ensure_supabase_auth_shadow_user(email)
+    try:
+        supabase.auth.reset_password_for_email(email, {"redirect_to": redirect_to})
+    except Exception:
+        pass
+
+    return generic_response
+
+
+@router.post("/complete-password-reset")
+async def complete_password_reset(req: CompletePasswordResetRequest):
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Neues Passwort muss mindestens 8 Zeichen haben")
+
+    try:
+        user_response = supabase.auth.get_user(req.access_token)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Reset-Link ist ungültig oder abgelaufen") from exc
+
+    supabase_user = getattr(user_response, "user", None)
+    email = str(getattr(supabase_user, "email", "") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Reset-Link ist ungültig oder abgelaufen")
+
+    new_hash = _hash_password(req.new_password)
+
+    if not _get_user(email):
+        full_name = email.split("@", 1)[0]
+        _db_create_user(email, full_name, new_hash)
+        users_store[email] = {"password": new_hash, "full_name": full_name, "premium": False}
+    else:
+        updated = set_password_by_email(email, new_hash)
+        if not updated:
+            raise HTTPException(status_code=500, detail="Passwort konnte nicht aktualisiert werden")
+
+    return {"message": "Passwort erfolgreich aktualisiert. Du kannst dich jetzt anmelden.", "email": email}
 
 
 @router.post("/feedback")
