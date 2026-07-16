@@ -19,13 +19,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from .routers import twin, users, payments, beta, profile
+from .routers import twin, users, payments, beta, profile, chat
 
 app.include_router(users.router, prefix="/api/users")
 app.include_router(twin.router, prefix="/api/twin")
 app.include_router(payments.router, prefix="/api/payments")
 app.include_router(beta.router, prefix="/api/beta")
 app.include_router(profile.router, prefix="/api/profile")
+app.include_router(chat.router, prefix="/api/chat")
 
 @app.get("/")
 def root():
