@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
 
+from ..core.plans import get_all_configured_price_ids, get_configured_price_id
 from .users import get_email_by_token, set_premium_by_email
 
 load_dotenv()
@@ -24,6 +25,29 @@ class CreateCheckout(BaseModel):
     price_id: str
     token: str | None = None
 
+
+class CreatePlanCheckout(BaseModel):
+    plan: str
+    interval: str = "monthly"
+    token: str | None = None
+
+
+@router.post("/create-plan-checkout")
+async def create_plan_checkout(data: CreatePlanCheckout):
+    """Preferred entrypoint: the client only ever names a plan + interval
+    (e.g. "pro" / "yearly"), never a raw Stripe price_id. The actual price_id
+    is looked up server-side from env vars, so nothing the client sends can
+    make us charge an unintended price."""
+    price_id = get_configured_price_id(data.plan, data.interval)
+    if not price_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Dieser Tarif ist noch nicht verfügbar. Trag dich gerne für die Warteliste ein.",
+        )
+
+    return await create_checkout(CreateCheckout(price_id=price_id, token=data.token))
+
+
 @router.post("/create-checkout")
 async def create_checkout(data: CreateCheckout):
     if not stripe.api_key:
@@ -31,6 +55,11 @@ async def create_checkout(data: CreateCheckout):
 
     if not data.price_id.startswith("price_"):
         raise HTTPException(status_code=400, detail="Ungueltige Preis-ID. Erwartet wird eine price_... ID")
+
+    # Never trust a client-supplied price_id on its own: it must match one of
+    # the prices we ourselves configured server-side via env vars.
+    if data.price_id not in get_all_configured_price_ids():
+        raise HTTPException(status_code=400, detail="Unbekannte oder nicht konfigurierte Preis-ID")
 
     email = get_email_by_token(data.token)
     if not email:
