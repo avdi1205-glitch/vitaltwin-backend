@@ -8,10 +8,11 @@ from uuid import uuid4
 
 import bcrypt
 import jwt
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from ..core.supabase import supabase
+from ..core.rate_limit import enforce_rate_limit
 
 router = APIRouter()
 
@@ -305,7 +306,8 @@ def is_premium_by_email(email: str) -> bool:
     return bool(user.get("premium", False))
 
 @router.post("/register")
-async def register(req: RegisterRequest):
+async def register(req: RegisterRequest, request: Request):
+    enforce_rate_limit(request, "register", max_requests=5, window_seconds=60)
     email = req.email.strip().lower()
 
     if _get_user(email):
@@ -333,7 +335,8 @@ async def register(req: RegisterRequest):
     return {"message": "Registrierung erfolgreich", "email": email}
 
 @router.post("/login")
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, request: Request):
+    enforce_rate_limit(request, "login", max_requests=10, window_seconds=60)
     email = req.email.strip().lower()
     user = _get_user(email)
 
@@ -523,7 +526,8 @@ async def complete_password_reset(req: CompletePasswordResetRequest):
 
 
 @router.post("/feedback")
-async def submit_feedback(req: FeedbackRequest, authorization: str | None = Header(default=None)):
+async def submit_feedback(req: FeedbackRequest, request: Request, authorization: str | None = Header(default=None)):
+    enforce_rate_limit(request, "feedback", max_requests=10, window_seconds=60)
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Nicht eingeloggt")
 

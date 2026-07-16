@@ -1,9 +1,10 @@
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..core.supabase import supabase
+from ..core.rate_limit import enforce_rate_limit
 
 router = APIRouter()
 
@@ -45,7 +46,8 @@ def _db_has_application(email: str) -> bool:
 
 
 @router.post("/apply")
-async def apply_for_beta(req: BetaApplicationRequest):
+async def apply_for_beta(req: BetaApplicationRequest, request: Request):
+    enforce_rate_limit(request, "beta_apply", max_requests=5, window_seconds=60)
     # Silently pretend success for bots so they don't learn to adapt.
     if req.website:
         return {
