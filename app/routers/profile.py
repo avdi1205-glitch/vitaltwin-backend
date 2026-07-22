@@ -8,7 +8,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from ..core.supabase import supabase
-from .users import get_email_by_token
+from ..core.auth import require_email as _require_email_dependency
 
 router = APIRouter()
 
@@ -36,13 +36,12 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 def _require_email(authorization: str | None) -> str:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Nicht eingeloggt")
-    token = authorization.split(" ", 1)[1].strip()
-    email = get_email_by_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Session abgelaufen")
-    return email
+    # Delegates to the centralized auth helper (Twin Intelligence Core,
+    # Etappe 2) instead of duplicating the "parse Authorization header ->
+    # decode JWT" logic here. Kept as a thin wrapper so every existing call
+    # site in this file (`_require_email(authorization)`) keeps working
+    # unchanged.
+    return _require_email_dependency(authorization)
 
 
 class ProfileUpdate(BaseModel):
