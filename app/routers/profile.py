@@ -12,6 +12,7 @@ from ..core.auth import require_email as _require_email_dependency
 from ..core.audit import record_audit_event
 from ..core.learning_events import record_learning_event
 from ..core.validation import (
+    MAX_SYNC_EXPORT_ROWS,
     validate_local_date_not_future,
     validate_movement_minutes,
     validate_scale_1_to_10,
@@ -19,6 +20,7 @@ from ..core.validation import (
     validate_sleep_hours,
 )
 from ..services.habit_service import compute_habit_stats
+from ..services.privacy_export import count_total_export_rows, exceeds_sync_export_limit
 from ..services.trends import compute_trend
 
 router = APIRouter()
@@ -28,6 +30,18 @@ DAILY_ENTRY_TABLE = "vt_daily_wellness_entries"
 HABIT_TABLE = "vt_habits"
 HABIT_ENTRY_TABLE = "vt_habit_entries"
 GOAL_TABLE = "vt_wellness_goals"
+DAILY_PLAN_TABLE = "vt_daily_plans"
+DAILY_PLAN_ACTION_TABLE = "vt_daily_plan_actions"
+DAILY_REFLECTION_TABLE = "vt_daily_reflections"
+WEEKLY_REFLECTION_TABLE = "vt_weekly_reflections"
+RECOMMENDATION_TABLE = "vt_recommendations"
+RECOMMENDATION_DECISION_TABLE = "vt_recommendation_decisions"
+RECOMMENDATION_OUTCOME_TABLE = "vt_recommendation_outcomes"
+RECOMMENDATION_FEEDBACK_TABLE = "vt_recommendation_feedback"
+MEMORY_TABLE = "vt_twin_memory"
+PATTERN_TABLE = "vt_twin_patterns"
+LEARNING_EVENT_TABLE = "vt_twin_learning_events"
+CONSENT_TABLE = "vt_consent_records"
 
 _CURRENT_YEAR = datetime.now(timezone.utc).year
 
@@ -399,6 +413,8 @@ async def request_deletion(authorization: str | None = Header(default=None)):
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Löschanfrage konnte nicht gespeichert werden.") from exc
 
+    record_audit_event(user_id=None, email=email, action="deletion_request", entity_type="account")
+
     return {
         "message": "Deine Löschanfrage wurde gespeichert. Wir melden uns per E-Mail und bearbeiten sie manuell, "
         "um versehentlichen Datenverlust auszuschließen. Du kannst uns auch direkt unter info@vitaltwin.de erreichen.",
@@ -407,29 +423,58 @@ async def request_deletion(authorization: str | None = Header(default=None)):
 
 @router.get("/export")
 async def export_profile(authorization: str | None = Header(default=None)):
+    """Etappe 9 §1: vollständiger Datenexport — jede in der Constitution/
+    den Etappen 2-7 gespeicherte Kategorie, ausschließlich für den
+    anfragenden Nutzer (jede Abfrage `.eq("email", email)`), niemals Daten
+    anderer Nutzer. Oberhalb von `MAX_SYNC_EXPORT_ROWS` wird der Export
+    abgelehnt statt eine sehr große Antwort zu erzwingen — siehe
+    `services/privacy_export.py` und `docs/TWIN_BETA_LIMITATIONS.md`
+    ("für spätere Background Jobs vorbereiten")."""
     email = _require_email(authorization)
 
+    def _load(table: str) -> list[dict[str, object]]:
+        try:
+            return supabase.table(table).select("*").eq("email", email).execute().data or []
+        except Exception:
+            return []
+
     profile = _get_profile_row(email) or {}
-    try:
-        daily = supabase.table(DAILY_ENTRY_TABLE).select("*").eq("email", email).execute().data or []
-    except Exception:
-        daily = []
-    try:
-        habits = supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
-    except Exception:
-        habits = []
-    try:
-        habit_entries = supabase.table(HABIT_ENTRY_TABLE).select("*").eq("email", email).execute().data or []
-    except Exception:
-        habit_entries = []
+    bundle = {
+        "profile": profile,
+        "daily_wellness_entries": _load(DAILY_ENTRY_TABLE),
+        "habits": _load(HABIT_TABLE),
+        "habit_entries": _load(HABIT_ENTRY_TABLE),
+        "goals": _load(GOAL_TABLE),
+        "daily_plans": _load(DAILY_PLAN_TABLE),
+        "daily_plan_actions": _load(DAILY_PLAN_ACTION_TABLE),
+        "daily_reflections": _load(DAILY_REFLECTION_TABLE),
+        "weekly_reflections": _load(WEEKLY_REFLECTION_TABLE),
+        "recommendations": _load(RECOMMENDATION_TABLE),
+        "recommendation_decisions": _load(RECOMMENDATION_DECISION_TABLE),
+        "recommendation_outcomes": _load(RECOMMENDATION_OUTCOME_TABLE),
+        "recommendation_feedback": _load(RECOMMENDATION_FEEDBACK_TABLE),
+        "twin_memories": _load(MEMORY_TABLE),
+        "twin_patterns": _load(PATTERN_TABLE),
+        "twin_learning_events": _load(LEARNING_EVENT_TABLE),
+        "consents": _load(CONSENT_TABLE),
+    }
+
+    total_rows = count_total_export_rows(bundle)
+    if exceeds_sync_export_limit(total_rows):
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Dein Datenumfang ({total_rows} Einträge) übersteigt die Grenze für einen direkten Export "
+                f"({MAX_SYNC_EXPORT_ROWS}). Bitte kontaktiere info@vitaltwin.de für einen manuellen Export."
+            ),
+        )
+
+    record_audit_event(user_id=None, email=email, action="export_request", entity_type="full_export")
 
     return {
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "email": email,
-        "profile": profile,
-        "daily_wellness_entries": daily,
-        "habits": habits,
-        "habit_entries": habit_entries,
+        **bundle,
     }
 
 

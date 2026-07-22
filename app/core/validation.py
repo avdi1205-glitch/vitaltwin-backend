@@ -209,6 +209,47 @@ dokumentierten realen Datenschwellen erreicht werden."""
 
 MAX_REFLECTION_TEXT = 500
 
+# --- Etappe 9: Privacy, Consent, Export, Deletion ---------------------------
+
+ConsentType = Literal[
+    "wellness_data_processing",
+    "ai_features",
+    "chat_storage",
+    "wearables_future",
+    "marketing",
+    "affiliate_tracking",
+    "research_optional",
+]
+"""Getrennte Einwilligungen pro Zweck (Etappe 9 §3) — niemals eine
+pauschale Einwilligung für mehrere Zwecke. `wearables_future` ist reserviert
+(keine Wearable-Anbindung existiert bislang, siehe Etappe 2/4), damit ein
+späteres Feature nicht ohne vorbereitete Einwilligung startet."""
+
+DataCategory = Literal[
+    "checkins",
+    "habits",
+    "habit_entries",
+    "goals",
+    "daily_plans",
+    "reflections",
+    "weekly_reflections",
+    "recommendations",
+    "memories",
+    "patterns",
+    "chat_history",
+    "feedback",
+]
+"""Löschbare Datenkategorien (Etappe 9 §2) — jede Kategorie kann unabhängig
+und vollständig für den anfragenden Nutzer gelöscht werden, ohne die
+übrigen Kategorien zu berühren."""
+
+MAX_SYNC_EXPORT_ROWS = 5000
+"""Etappe 9 §1 "Große Exporte für spätere Background Jobs vorbereiten":
+oberhalb dieser Gesamtzeilenzahl wird der Export synchron abgelehnt (mit
+einer ehrlichen Fehlermeldung), statt eine sehr große Antwort zu erzwingen
+oder den Prozess zu blockieren — siehe `services/privacy_export.py` und
+`docs/TWIN_BETA_LIMITATIONS.md`."""
+
 
 def validate_scale_1_to_10(value: int | None, *, field_name: str) -> int | None:
     """Energy, mood, stress, motivation, sleep quality, recovery: all 1-10."""
