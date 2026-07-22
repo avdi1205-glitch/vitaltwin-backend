@@ -19,7 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from .routers import twin, users, payments, beta, profile, chat, recommendations, twin_memory
+from .routers import twin, users, payments, beta, profile, chat, recommendations, twin_memory, daily_planning
 
 app.include_router(users.router, prefix="/api/users")
 app.include_router(twin.router, prefix="/api/twin")
@@ -29,6 +29,7 @@ app.include_router(profile.router, prefix="/api/profile")
 app.include_router(chat.router, prefix="/api/chat")
 app.include_router(recommendations.router, prefix="/api/recommendations")
 app.include_router(twin_memory.router, prefix="/api/memory")
+app.include_router(daily_planning.router, prefix="/api/planning")
 
 @app.get("/")
 def root():

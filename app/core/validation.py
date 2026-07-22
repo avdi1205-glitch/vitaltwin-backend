@@ -177,6 +177,38 @@ LearningEventSourceType = Literal[
 
 MAX_MEMORY_REASON = 280
 
+# --- Etappe 6: Daily Planning, Evening Reflection, Weekly Reflection -------
+
+DailyPlanStatus = Literal["active", "completed", "archived"]
+
+DailyPlanActionStatus = Literal[
+    "proposed",
+    "accepted",
+    "modified",
+    "completed",
+    "skipped",
+    "rejected",
+]
+"""Mirrors the Recommendation-Loop lifecycle (Etappe 4) for consistency —
+a planned action goes through the same "vorgeschlagen -> Entscheidung des
+Nutzers -> Umsetzung" shape (Etappe 6 §1: "Übernehmen oder Ablehnen",
+"Anpassungsmöglichkeit")."""
+
+DailyPlanActionSource = Literal["goal", "habit", "recommendation", "carried_over", "manual"]
+
+MaturityLevel = Literal[
+    "start",
+    "lernt_dich_kennen",
+    "erkennt_routinen",
+    "versteht_praeferenzen",
+    "begleitet_langfristig",
+]
+"""Twin-Reifegrad (Etappe 6 §6) — rein datengestützt, siehe
+`services/twin_maturity.py`. Keine der fünf Stufen darf ohne die dort
+dokumentierten realen Datenschwellen erreicht werden."""
+
+MAX_REFLECTION_TEXT = 500
+
 
 def validate_scale_1_to_10(value: int | None, *, field_name: str) -> int | None:
     """Energy, mood, stress, motivation, sleep quality, recovery: all 1-10."""
