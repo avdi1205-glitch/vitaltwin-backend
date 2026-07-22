@@ -27,6 +27,7 @@ from pydantic import BaseModel, field_validator
 
 from ..core.audit import record_audit_event
 from ..core.auth import require_email as _require_email_dependency
+from ..core.learning_events import record_learning_event
 from ..core.supabase import supabase
 from ..core.validation import MAX_FEEDBACK_COMMENT, validate_short_text
 from ..services import personalization
@@ -357,6 +358,19 @@ async def decide_recommendation(
         entity_id=recommendation_id,
         metadata={"decision": data.decision},
     )
+    if data.decision in ("rejected", "skipped"):
+        # Etappe 5 §4: dokumentiert als Twin Learning Event (Lernschritt),
+        # getrennt vom reinen Compliance-Audit-Log oben.
+        record_learning_event(
+            user_id=None,
+            email=email,
+            event_type="empfehlung_abgelehnt",
+            source_type="recommendation_decision",
+            source_id=recommendation_id,
+            previous_state={"status": recommendation.get("status")},
+            new_state={"status": data.decision},
+            reason=data.reason,
+        )
     return {"message": "Entscheidung gespeichert.", "status": data.decision}
 
 
@@ -388,6 +402,16 @@ async def report_outcome(
     record_audit_event(
         user_id=None, email=email, action="update", entity_type="recommendation_outcome", entity_id=recommendation_id
     )
+    if data.outcome_status == "completed":
+        record_learning_event(
+            user_id=None,
+            email=email,
+            event_type="empfehlung_erfolgreich",
+            source_type="recommendation_outcome",
+            source_id=recommendation_id,
+            new_state={"outcome_status": data.outcome_status},
+            reason=data.result_notes,
+        )
     return {"message": "Ergebnis gespeichert."}
 
 

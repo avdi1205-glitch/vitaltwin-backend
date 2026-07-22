@@ -112,6 +112,71 @@ FeedbackReason = Literal[
 
 MAX_FEEDBACK_COMMENT = 500
 
+# --- Etappe 5: Twin Memory, Pattern Detection, Learning Events -------------
+
+MemoryType = Literal[
+    "bestaetigte_praeferenz",
+    "aktives_langfristiges_ziel",
+    "bevorzugte_aktivitaetszeit",
+    "erfolgreiche_routine",
+    "abgelehnter_empfehlungstyp",
+    "bestaetigtes_muster",
+    "bevorzugte_kommunikationsform",
+    "persoenliche_regel",
+]
+"""Die acht speicherbaren Memory-Typen aus Etappe 5 §1. `persoenliche_regel`
+ist die einzige, die ausschließlich vom Nutzer selbst (nie automatisch vom
+Twin) erzeugt werden darf — siehe Etappe 5 §1: "ausdrücklich gespeicherte
+persönliche Regel"."""
+
+MemoryStatus = Literal[
+    "candidate",
+    "active",
+    "confirmed",
+    "disputed",
+    "archived",
+    "deleted",
+]
+"""Lebenszyklus einer Memory (Etappe 5 §5): Beobachtung -> `candidate` ->
+wiederholte Bestätigung -> `active` -> Nutzerbestätigung -> `confirmed`.
+`disputed` = widersprochen/abgelehnt, aber noch nicht gelöscht. Eine
+einmalige Beobachtung darf niemals direkt als `confirmed` gespeichert werden
+(§1: "keine absolute Wahrheit aus einer einzelnen Beobachtung")."""
+
+PatternStatus = Literal["active", "discarded"]
+
+LearningEventType = Literal[
+    "praeferenz_erkannt",
+    "praeferenz_bestaetigt",
+    "empfehlung_erfolgreich",
+    "empfehlung_abgelehnt",
+    "muster_erkannt",
+    "muster_verworfen",
+    "ziel_angepasst",
+    "memory_erstellt",
+    "memory_korrigiert",
+    "memory_geloescht",
+    # Zusätzlich zu den 10 Beispielen aus Etappe 5 §4: eigene Ereignistypen
+    # für Memory-Lebenszyklusaktionen (§2/§5), die dort nicht explizit
+    # aufgeführt sind, aber dieselbe Dokumentationspflicht haben.
+    "memory_bestaetigt",
+    "memory_abgelehnt",
+    "memory_archiviert",
+]
+
+LearningEventSourceType = Literal[
+    "recommendation",
+    "recommendation_decision",
+    "recommendation_outcome",
+    "recommendation_feedback",
+    "habit",
+    "wellness_goal",
+    "twin_memory",
+    "twin_pattern",
+]
+
+MAX_MEMORY_REASON = 280
+
 
 def validate_scale_1_to_10(value: int | None, *, field_name: str) -> int | None:
     """Energy, mood, stress, motivation, sleep quality, recovery: all 1-10."""

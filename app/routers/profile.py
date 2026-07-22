@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..core.supabase import supabase
 from ..core.auth import require_email as _require_email_dependency
 from ..core.audit import record_audit_event
+from ..core.learning_events import record_learning_event
 from ..core.validation import (
     validate_local_date_not_future,
     validate_movement_minutes,
@@ -788,7 +789,7 @@ def _require_own_goal(email: str, goal_id: str) -> dict[str, object]:
 @router.patch("/goals/{goal_id}")
 async def update_goal(goal_id: str, data: GoalUpdate, authorization: str | None = Header(default=None)):
     email = _require_email(authorization)
-    _require_own_goal(email, goal_id)
+    existing_goal = _require_own_goal(email, goal_id)
 
     payload = data.model_dump(exclude_none=True)
     if "target_date" in payload and payload["target_date"] is not None:
@@ -803,6 +804,22 @@ async def update_goal(goal_id: str, data: GoalUpdate, authorization: str | None 
         raise HTTPException(status_code=500, detail="Ziel konnte nicht aktualisiert werden.") from exc
 
     record_audit_event(user_id=None, email=email, action="update", entity_type="wellness_goal", entity_id=goal_id)
+    # Etappe 5 §4: eine inhaltliche Änderung (Status/Zielwert/Zieldatum, nicht
+    # nur updated_at) ist ein dokumentierter Twin-Lernschritt — der Twin merkt
+    # sich, dass sich das Ziel des Nutzers verändert hat.
+    if any(key in payload for key in ("status", "target_value", "target_date", "title")):
+        record_learning_event(
+            user_id=None,
+            email=email,
+            event_type="ziel_angepasst",
+            source_type="wellness_goal",
+            source_id=goal_id,
+            previous_state={
+                key: existing_goal.get(key) for key in ("status", "target_value", "target_date", "title") if key in payload
+            },
+            new_state={key: payload[key] for key in ("status", "target_value", "target_date", "title") if key in payload},
+            reason=None,
+        )
     return _require_own_goal(email, goal_id)
 
 
