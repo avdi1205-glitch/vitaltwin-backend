@@ -97,6 +97,28 @@ def get_chat_daily_limit(plan: str) -> int:
     return CHAT_DAILY_LIMITS.get(plan, CHAT_DAILY_LIMITS["free"])
 
 
+# Twin Intelligence Core — Etappe 7 §7: server-side context-size ceiling per
+# plan (character budget for the assembled Twin Context — see
+# `services/twin_context.py`). FREE gets a small, essential-only context;
+# PREMIUM/PRO get progressively more room for trends/patterns/memories
+# ("erweiterter Kontext"/"mehr Langzeitkontext"). FAMILY is currently
+# indistinguishable from PREMIUM in the database (see Block 3 open items) and
+# gets the same budget — "getrennte private Profile pro Familienmitglied"
+# already holds naturally because every query is scoped by the requesting
+# user's own `email` (each family member has their own login), not by a
+# shared family record.
+CONTEXT_CHAR_LIMITS: dict[str, int] = {
+    "free": 600,
+    "premium": 1500,
+    "pro": 2500,
+    "family": 1500,
+}
+
+
+def get_context_char_limit(plan: str) -> int:
+    return CONTEXT_CHAR_LIMITS.get(plan, CONTEXT_CHAR_LIMITS["free"])
+
+
 def get_configured_price_id(plan: str, interval: str) -> str | None:
     """Returns the Stripe price ID configured for a plan/interval via env vars,
     or None if that plan/interval is not (yet) available for purchase."""
