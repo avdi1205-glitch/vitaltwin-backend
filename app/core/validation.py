@@ -58,6 +58,60 @@ DataQuality = Literal[
 `missing`; never report a `calculated` value with `verified_source`-level
 confidence."""
 
+# --- Etappe 4: Recommendation / Decision / Outcome / Feedback loops ---------
+
+RecommendationStatus = Literal[
+    "proposed",
+    "accepted",
+    "modified",
+    "completed",
+    "skipped",
+    "rejected",
+    "expired",
+]
+
+RecommendationPriority = Literal["low", "medium", "high"]
+
+RecommendationSourceType = Literal["rule_based", "ai_generated"]
+"""Etappe 4 only implements `rule_based` (§2: "regelbasierte
+Beta-Empfehlungen"). `ai_generated` is reserved for a later etappe — never
+claim a recommendation came from an AI model it didn't actually come from."""
+
+DecisionType = Literal["accepted", "modified", "skipped", "rejected"]
+
+OutcomeStatus = Literal[
+    "not_started",
+    "started",
+    "partially_completed",
+    "completed",
+    "not_implemented",
+]
+
+OutcomeSource = Literal[
+    "user_reported",
+    "derived_from_checkin",
+    "derived_from_habit_entry",
+    "imported_from_wearable",
+]
+"""Wearable import isn't implemented yet (Etappe 4) — reserved so a later
+etappe doesn't need another migration. Never store an outcome without a
+real source that produced it (§4: "keine Ergebnisse erfinden")."""
+
+FeedbackHelpfulness = Literal["helpful", "partially_helpful", "not_helpful"]
+
+FeedbackReason = Literal[
+    "nicht_passend",
+    "falscher_zeitpunkt",
+    "zu_schwierig",
+    "zu_einfach",
+    "bereits_erledigt",
+    "unverstaendlich",
+    "nicht_relevant",
+    "anderer_grund",
+]
+
+MAX_FEEDBACK_COMMENT = 500
+
 
 def validate_scale_1_to_10(value: int | None, *, field_name: str) -> int | None:
     """Energy, mood, stress, motivation, sleep quality, recovery: all 1-10."""
