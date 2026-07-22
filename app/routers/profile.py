@@ -9,6 +9,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..core.supabase import supabase
 from ..core.auth import require_email as _require_email_dependency
+from ..core.audit import record_audit_event
+from ..core.validation import (
+    validate_local_date_not_future,
+    validate_movement_minutes,
+    validate_scale_1_to_10,
+    validate_short_text,
+    validate_sleep_hours,
+)
+from ..services.habit_service import compute_habit_stats
+from ..services.trends import compute_trend
 
 router = APIRouter()
 
@@ -16,6 +26,7 @@ PROFILE_TABLE = "vt_user_profiles"
 DAILY_ENTRY_TABLE = "vt_daily_wellness_entries"
 HABIT_TABLE = "vt_habits"
 HABIT_ENTRY_TABLE = "vt_habit_entries"
+GOAL_TABLE = "vt_wellness_goals"
 
 _CURRENT_YEAR = datetime.now(timezone.utc).year
 
@@ -32,6 +43,9 @@ ALLOWED_WELLNESS_GOALS = {
 
 ALLOWED_HABIT_CATEGORIES = {"schlaf", "bewegung", "ernaehrung", "stress", "energie", "erholung", "sonstiges"}
 ALLOWED_HABIT_FREQUENCIES = {"taeglich", "mehrmals_woche", "woechentlich"}
+ALLOWED_HABIT_STATUSES = {"active", "paused", "archived"}
+ALLOWED_GOAL_CATEGORIES = ALLOWED_WELLNESS_GOALS | {"eigenes_ziel"}
+ALLOWED_GOAL_STATUSES = {"active", "paused", "completed", "archived"}
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
@@ -85,11 +99,74 @@ class DailyWellnessEntryInput(BaseModel):
     entry_date: date | None = None
     sleep_hours: float | None = Field(default=None, ge=0, le=16)
     movement_days_per_week: int | None = Field(default=None, ge=0, le=7)
+    movement_minutes: int | None = None
     steps: int | None = Field(default=None, ge=0, le=100000)
     stress_level: int | None = Field(default=None, ge=1, le=5)
     energy_level: int | None = Field(default=None, ge=1, le=5)
     nutrition_habit: Literal["meist_unverarbeitet", "gemischt", "meist_verarbeitet"] | None = None
     water_habit: Literal["wenig", "mittel", "viel"] | None = None
+    # Etappe 3: real 1-10 self-report scales (Constitution: energy, mood,
+    # stress, motivation, sleep quality, recovery). `stress_level`/
+    # `energy_level` above stay on their original 1-5 scale for backward
+    # compatibility with the existing onboarding/dashboard forms — these are
+    # additive, not a replacement.
+    energy: int | None = None
+    stress: int | None = None
+    mood: int | None = None
+    motivation: int | None = None
+    sleep_quality: int | None = None
+    recovery: int | None = None
+    note: str | None = None
+
+    @field_validator("entry_date")
+    @classmethod
+    def _validate_entry_date(cls, value: date | None) -> date | None:
+        return validate_local_date_not_future(value, field_name="Check-in-Datum")
+
+    @field_validator("sleep_hours")
+    @classmethod
+    def _validate_sleep_hours_field(cls, value: float | None) -> float | None:
+        return validate_sleep_hours(value)
+
+    @field_validator("movement_minutes")
+    @classmethod
+    def _validate_movement_minutes_field(cls, value: int | None) -> int | None:
+        return validate_movement_minutes(value)
+
+    @field_validator("mood")
+    @classmethod
+    def _validate_mood(cls, value: int | None) -> int | None:
+        return validate_scale_1_to_10(value, field_name="Stimmung")
+
+    @field_validator("energy")
+    @classmethod
+    def _validate_energy(cls, value: int | None) -> int | None:
+        return validate_scale_1_to_10(value, field_name="Energie")
+
+    @field_validator("stress")
+    @classmethod
+    def _validate_stress(cls, value: int | None) -> int | None:
+        return validate_scale_1_to_10(value, field_name="Stress")
+
+    @field_validator("motivation")
+    @classmethod
+    def _validate_motivation(cls, value: int | None) -> int | None:
+        return validate_scale_1_to_10(value, field_name="Motivation")
+
+    @field_validator("sleep_quality")
+    @classmethod
+    def _validate_sleep_quality(cls, value: int | None) -> int | None:
+        return validate_scale_1_to_10(value, field_name="Schlafqualität")
+
+    @field_validator("recovery")
+    @classmethod
+    def _validate_recovery(cls, value: int | None) -> int | None:
+        return validate_scale_1_to_10(value, field_name="Erholung")
+
+    @field_validator("note")
+    @classmethod
+    def _validate_note(cls, value: str | None) -> str | None:
+        return validate_short_text(value, field_name="Notiz", max_length=280)
 
 
 class HabitCreate(BaseModel):
@@ -100,6 +177,14 @@ class HabitCreate(BaseModel):
     reminder_enabled: bool = False
     reminder_time: str | None = None
     active: bool = True
+    status: str = "active"
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        if value not in ALLOWED_HABIT_STATUSES:
+            raise ValueError(f"Ungültiger Status. Erlaubt: {', '.join(sorted(ALLOWED_HABIT_STATUSES))}")
+        return value
 
     @field_validator("name")
     @classmethod
@@ -141,6 +226,14 @@ class HabitUpdate(BaseModel):
     reminder_enabled: bool | None = None
     reminder_time: str | None = None
     active: bool | None = None
+    status: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status_update(cls, value: str | None) -> str | None:
+        if value is not None and value not in ALLOWED_HABIT_STATUSES:
+            raise ValueError(f"Ungültiger Status. Erlaubt: {', '.join(sorted(ALLOWED_HABIT_STATUSES))}")
+        return value
 
     @field_validator("category")
     @classmethod
@@ -169,6 +262,72 @@ class HabitUpdate(BaseModel):
 class HabitEntryInput(BaseModel):
     entry_date: date | None = None
     completed: bool = True
+
+    @field_validator("entry_date")
+    @classmethod
+    def _validate_entry_date(cls, value: date | None) -> date | None:
+        return validate_local_date_not_future(value, field_name="Eintragsdatum")
+
+
+class GoalCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    goal_type: str
+    target_value: float | None = None
+    target_date: date | None = None
+    status: str = "active"
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Bitte gib einen Titel für das Ziel ein.")
+        return stripped
+
+    @field_validator("goal_type")
+    @classmethod
+    def _validate_goal_type(cls, value: str) -> str:
+        if value not in ALLOWED_GOAL_CATEGORIES:
+            raise ValueError(f"Ungültige Zielkategorie. Erlaubt: {', '.join(sorted(ALLOWED_GOAL_CATEGORIES))}")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        if value not in ALLOWED_GOAL_STATUSES:
+            raise ValueError(f"Ungültiger Status. Erlaubt: {', '.join(sorted(ALLOWED_GOAL_STATUSES))}")
+        return value
+
+    @field_validator("target_date")
+    @classmethod
+    def _validate_target_date(cls, value: date | None) -> date | None:
+        # Target dates are explicitly allowed in the future (that's the
+        # point of a goal) — only reject dates before today.
+        if value is not None and value < date.today():
+            raise ValueError("Zieldatum darf nicht in der Vergangenheit liegen.")
+        return value
+
+
+class GoalUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    goal_type: str | None = None
+    target_value: float | None = None
+    target_date: date | None = None
+    status: str | None = None
+
+    @field_validator("goal_type")
+    @classmethod
+    def _validate_goal_type(cls, value: str | None) -> str | None:
+        if value is not None and value not in ALLOWED_GOAL_CATEGORIES:
+            raise ValueError(f"Ungültige Zielkategorie. Erlaubt: {', '.join(sorted(ALLOWED_GOAL_CATEGORIES))}")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status_update(cls, value: str | None) -> str | None:
+        if value is not None and value not in ALLOWED_GOAL_STATUSES:
+            raise ValueError(f"Ungültiger Status. Erlaubt: {', '.join(sorted(ALLOWED_GOAL_STATUSES))}")
+        return value
 
 
 def _get_profile_row(email: str) -> dict[str, object] | None:
@@ -281,6 +440,7 @@ async def upsert_daily_entry(data: DailyWellnessEntryInput, authorization: str |
     payload = data.model_dump(exclude_none=True, exclude={"entry_date"})
     payload["email"] = email
     payload["entry_date"] = entry_date
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
         existing = (
@@ -291,12 +451,25 @@ async def upsert_daily_entry(data: DailyWellnessEntryInput, authorization: str |
             .limit(1)
             .execute()
         )
-        if existing.data:
+        is_update = bool(existing.data)
+        if is_update:
             supabase.table(DAILY_ENTRY_TABLE).update(payload).eq("email", email).eq("entry_date", entry_date).execute()
         else:
             supabase.table(DAILY_ENTRY_TABLE).insert(payload).execute()
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Tageswert konnte nicht gespeichert werden.") from exc
+
+    # Etappe 3 §1: "Twin-Kontext als veraltet markieren" — a lightweight
+    # audit event marks that today's inputs changed, so a later
+    # TwinContextService (Etappe 7) knows to rebuild its context instead of
+    # serving a stale one. No heavy recomputation happens here yet.
+    record_audit_event(
+        user_id=None,
+        email=email,
+        action="update" if is_update else "create",
+        entity_type="daily_wellness_entry",
+        entity_id=entry_date,
+    )
 
     return {"message": "Gespeichert.", "entry_date": entry_date}
 
@@ -320,20 +493,125 @@ async def list_daily_entries(days: int = 14, authorization: str | None = Header(
         return {"items": []}
 
 
+@router.get("/daily/today")
+async def get_today_entry(authorization: str | None = Header(default=None)):
+    """Today's check-in in the caller's local calendar day. The client is
+    responsible for sending its own local date as `entry_date` on `/daily`
+    PUT — this endpoint simply looks up whatever was stored for the most
+    recent entry_date, since the server has no reliable way to know the
+    user's "today" without it (see Etappe 3 §9, Zeitzone)."""
+    email = _require_email(authorization)
+    today = date.today().isoformat()
+    try:
+        response = (
+            supabase.table(DAILY_ENTRY_TABLE)
+            .select("*")
+            .eq("email", email)
+            .eq("entry_date", today)
+            .limit(1)
+            .execute()
+        )
+        return {"item": response.data[0] if response.data else None, "entry_date": today}
+    except Exception:
+        return {"item": None, "entry_date": today}
+
+
+@router.delete("/daily/{entry_date}")
+async def delete_daily_entry(entry_date: str, authorization: str | None = Header(default=None)):
+    email = _require_email(authorization)
+    try:
+        supabase.table(DAILY_ENTRY_TABLE).delete().eq("email", email).eq("entry_date", entry_date).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Check-in konnte nicht gelöscht werden.") from exc
+
+    record_audit_event(user_id=None, email=email, action="delete", entity_type="daily_wellness_entry", entity_id=entry_date)
+    return {"message": "Check-in gelöscht."}
+
+
+@router.get("/trends")
+async def get_trends(authorization: str | None = Header(default=None)):
+    """Sleep, movement, stress, and recovery trends over 7 and 30 days
+    (Etappe 3 §2-4). Deliberately just transparent averages — no AI
+    interpretation, no diagnosis (see `services/trends.py` docstring)."""
+    email = _require_email(authorization)
+
+    try:
+        response = (
+            supabase.table(DAILY_ENTRY_TABLE)
+            .select("*")
+            .eq("email", email)
+            .order("entry_date", desc=True)
+            .limit(30)
+            .execute()
+        )
+        entries = response.data or []
+    except Exception:
+        entries = []
+
+    today = date.today()
+    fields = ["sleep_hours", "sleep_quality", "movement_minutes", "stress", "recovery", "mood", "energy"]
+    trends: dict[str, dict[str, object]] = {}
+    for field in fields:
+        for window in (7, 30):
+            trend = compute_trend(entries, field=field, window_days=window, today=today)
+            trends.setdefault(field, {})[f"{window}d"] = {
+                "average": trend.average,
+                "data_points": trend.data_points,
+                "data_quality": trend.data_quality,
+            }
+
+    return {"trends": trends, "disclaimer": (
+        "Diese Trends sind transparente Durchschnittswerte deiner eigenen Eintragungen \u2014 "
+        "keine medizinische Bewertung und keine Diagnose."
+    )}
+
+
 @router.get("/habits")
 async def list_habits(authorization: str | None = Header(default=None)):
     email = _require_email(authorization)
     try:
-        response = supabase.table(HABIT_TABLE).select("*").eq("email", email).order("created_at").execute()
-        return {"items": response.data or []}
+        habits = supabase.table(HABIT_TABLE).select("*").eq("email", email).order("created_at").execute().data or []
     except Exception:
         return {"items": []}
+
+    try:
+        all_entries = (
+            supabase.table(HABIT_ENTRY_TABLE)
+            .select("habit_id,entry_date,completed")
+            .eq("email", email)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        all_entries = []
+
+    entries_by_habit: dict[str, list[dict[str, object]]] = {}
+    for entry in all_entries:
+        entries_by_habit.setdefault(str(entry.get("habit_id")), []).append(entry)
+
+    today = date.today()
+    items = []
+    for habit in habits:
+        habit_id = str(habit.get("id"))
+        stats = compute_habit_stats(
+            entries_by_habit.get(habit_id, []),
+            habit_created_at=habit.get("created_at"),
+            today=today,
+        )
+        items.append({**habit, **stats})
+
+    return {"items": items}
 
 
 @router.post("/habits")
 async def create_habit(data: HabitCreate, authorization: str | None = Header(default=None)):
     email = _require_email(authorization)
     payload = data.model_dump()
+    # Keep the legacy `active` boolean in sync with the new tri-state
+    # `status` (Etappe 3 §5: active/paused/archived) so existing code paths
+    # that still filter on `active` continue to work unchanged.
+    payload["active"] = payload["status"] == "active"
     payload["email"] = email
 
     try:
@@ -341,6 +619,7 @@ async def create_habit(data: HabitCreate, authorization: str | None = Header(def
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Gewohnheit konnte nicht gespeichert werden.") from exc
 
+    record_audit_event(user_id=None, email=email, action="create", entity_type="habit", entity_id=payload.get("name"))
     return response.data[0] if response.data else payload
 
 
@@ -362,6 +641,8 @@ async def update_habit(habit_id: str, data: HabitUpdate, authorization: str | No
     payload = data.model_dump(exclude_none=True)
     if not payload:
         return _require_own_habit(email, habit_id)
+    if "status" in payload:
+        payload["active"] = payload["status"] == "active"
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
@@ -369,6 +650,7 @@ async def update_habit(habit_id: str, data: HabitUpdate, authorization: str | No
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Gewohnheit konnte nicht aktualisiert werden.") from exc
 
+    record_audit_event(user_id=None, email=email, action="update", entity_type="habit", entity_id=habit_id)
     return _require_own_habit(email, habit_id)
 
 
@@ -382,6 +664,7 @@ async def delete_habit(habit_id: str, authorization: str | None = Header(default
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Gewohnheit konnte nicht gelöscht werden.") from exc
 
+    record_audit_event(user_id=None, email=email, action="delete", entity_type="habit", entity_id=habit_id)
     return {"message": "Gewohnheit gelöscht."}
 
 
@@ -436,3 +719,109 @@ async def list_habit_entries(days: int = 30, authorization: str | None = Header(
         return {"items": response.data or []}
     except Exception:
         return {"items": []}
+
+
+# ---------------------------------------------------------------------------
+# Goal Loop (Etappe 3 §6) — vt_wellness_goals, created in Etappe 2.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/goals")
+async def list_goals(authorization: str | None = Header(default=None)):
+    email = _require_email(authorization)
+    try:
+        response = (
+            supabase.table(GOAL_TABLE)
+            .select("*")
+            .eq("email", email)
+            .is_("deleted_at", "null")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return {"items": response.data or []}
+    except Exception:
+        return {"items": []}
+
+
+@router.post("/goals")
+async def create_goal(data: GoalCreate, authorization: str | None = Header(default=None)):
+    email = _require_email(authorization)
+    payload = {
+        "email": email,
+        "title": data.title,
+        "goal_type": data.goal_type,
+        "status": data.status,
+        "target_value": data.target_value,
+        "target_date": data.target_date.isoformat() if data.target_date else None,
+        "source": "manual",
+    }
+
+    try:
+        response = supabase.table(GOAL_TABLE).insert(payload).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Ziel konnte nicht gespeichert werden.") from exc
+
+    record_audit_event(user_id=None, email=email, action="create", entity_type="wellness_goal", entity_id=data.goal_type)
+    return response.data[0] if response.data else payload
+
+
+def _require_own_goal(email: str, goal_id: str) -> dict[str, object]:
+    try:
+        response = (
+            supabase.table(GOAL_TABLE)
+            .select("*")
+            .eq("id", goal_id)
+            .eq("email", email)
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Ziel konnte nicht geladen werden.") from exc
+    if not response.data:
+        # 404, not 403 — see core/auth.py: a manipulated/guessed id must not
+        # be distinguishable from a non-existent one.
+        raise HTTPException(status_code=404, detail="Ziel nicht gefunden.")
+    return response.data[0]
+
+
+@router.patch("/goals/{goal_id}")
+async def update_goal(goal_id: str, data: GoalUpdate, authorization: str | None = Header(default=None)):
+    email = _require_email(authorization)
+    _require_own_goal(email, goal_id)
+
+    payload = data.model_dump(exclude_none=True)
+    if "target_date" in payload and payload["target_date"] is not None:
+        payload["target_date"] = data.target_date.isoformat()
+    if not payload:
+        return _require_own_goal(email, goal_id)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        supabase.table(GOAL_TABLE).update(payload).eq("id", goal_id).eq("email", email).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Ziel konnte nicht aktualisiert werden.") from exc
+
+    record_audit_event(user_id=None, email=email, action="update", entity_type="wellness_goal", entity_id=goal_id)
+    return _require_own_goal(email, goal_id)
+
+
+@router.delete("/goals/{goal_id}")
+async def delete_goal(goal_id: str, authorization: str | None = Header(default=None)):
+    """Soft delete (archives via `deleted_at`), never a hard delete — a
+    Goal's history (actions, reflections referencing it) should stay
+    queryable. See Etappe 3 §7: "Delete beziehungsweise sichere
+    Archivierung"."""
+    email = _require_email(authorization)
+    _require_own_goal(email, goal_id)
+
+    try:
+        supabase.table(GOAL_TABLE).update(
+            {"deleted_at": datetime.now(timezone.utc).isoformat(), "status": "archived"}
+        ).eq("id", goal_id).eq("email", email).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Ziel konnte nicht archiviert werden.") from exc
+
+    record_audit_event(user_id=None, email=email, action="delete", entity_type="wellness_goal", entity_id=goal_id)
+    return {"message": "Ziel archiviert."}
+
