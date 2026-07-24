@@ -63,6 +63,8 @@ Permission = Literal[
     "view_security",
     "manage_security",
     "view_system_status",
+    "view_integrations",
+    "manage_feature_flags",
     "view_support",
     "manage_support",
 ]
@@ -123,6 +125,7 @@ ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
             "view_ai_usage",
             "view_business",
             "view_system_status",
+            "view_integrations",
         }
     ),
     "developer": frozenset(
@@ -133,6 +136,7 @@ ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
             "view_ai_usage",
             "manage_ai_settings",
             "view_content",
+            "view_integrations",
         }
     ),
 }

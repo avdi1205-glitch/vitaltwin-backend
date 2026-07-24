@@ -77,6 +77,12 @@ class _FakeQuery:
         entry.setdefault("updated", []).append(payload)
         return self
 
+    def upsert(self, payload):
+        self._record("upsert", payload)
+        entry = self._store.setdefault(self._table_name, {})
+        entry.setdefault("upserted", []).append(payload)
+        return self
+
     def delete(self):
         self._record("delete")
         entry = self._store.setdefault(self._table_name, {})

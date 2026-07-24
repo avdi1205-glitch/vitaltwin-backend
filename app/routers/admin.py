@@ -16,6 +16,8 @@ Sections (matching the spec 1:1):
 - `/ai/usage`                      KI Control Center
 - `/business/overview`             Business Center
 - `/nutrition/overview`            Nutrition & CGM (honest stub — see below)
+- `/integrations`                  Platform Foundation (Connector/Provider status)
+- `/feature-flags*`                Feature Flags
 
 Every "not implemented" area (revenue reporting, token/cost tracking,
 affiliate programs, coupons, Health Connect/Apple Health, cron/queues) says
@@ -33,6 +35,7 @@ from pydantic import BaseModel, field_validator
 
 from ..core.admin_rbac import ROLE_PERMISSIONS, require_admin, require_admin_permission
 from ..core.audit import record_audit_event
+from ..core.integrations import get_full_integration_report
 from ..core.plans import get_configured_price_id
 from ..core.supabase import supabase
 from ..services.privacy_export import resolve_current_consents
@@ -838,3 +841,59 @@ async def nutrition_overview(authorization: str | None = Header(default=None)):
         "connector_status": [],
         "import_stats": {},
     }
+
+
+# ---------------------------------------------------------------------------
+# Platform Foundation — Integrations & Feature Flags
+# ---------------------------------------------------------------------------
+
+FEATURE_FLAG_TABLE = "vt_feature_flags"
+
+
+@router.get("/integrations")
+async def list_integrations(authorization: str | None = Header(default=None)):
+    """Real, live status of every connector/provider named in the platform
+    foundation spec — computed from actual env vars, never hardcoded to
+    "configured". See `core/integrations.py` for the single source of truth."""
+    require_admin_permission(authorization, "view_integrations")
+    return get_full_integration_report()
+
+
+@router.get("/feature-flags")
+async def list_feature_flags(authorization: str | None = Header(default=None)):
+    require_admin_permission(authorization, "view_integrations")
+    try:
+        rows = supabase.table(FEATURE_FLAG_TABLE).select("*").order("key").execute().data or []
+    except Exception:
+        rows = []
+    return {"items": rows}
+
+
+class FeatureFlagInput(BaseModel):
+    enabled: bool
+    description: str | None = None
+
+
+@router.put("/feature-flags/{key}")
+async def upsert_feature_flag(key: str, data: FeatureFlagInput, authorization: str | None = Header(default=None)):
+    admin = require_admin_permission(authorization, "manage_feature_flags")
+    payload = {
+        "key": key,
+        "enabled": data.enabled,
+        "updated_by": admin.email,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if data.description is not None:
+        payload["description"] = data.description
+
+    try:
+        supabase.table(FEATURE_FLAG_TABLE).upsert(payload).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Feature-Flag konnte nicht gespeichert werden.") from exc
+
+    record_audit_event(
+        user_id=None, email=admin.email, action="update", entity_type="feature_flag", entity_id=key,
+        metadata={"enabled": data.enabled},
+    )
+    return {"message": "Feature-Flag gespeichert."}
+
