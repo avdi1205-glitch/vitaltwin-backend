@@ -1,8 +1,9 @@
 -- Twin Intelligence Core — Etappe 6: Daily Planning, Evening Reflection und
 -- Weekly Reflection Loops.
 --
--- STATUS: Entwurf, NICHT gegen eine echte Datenbank ausgeführt (siehe
--- Etappe-2..5-Berichte: kein DB-Zugriff in dieser Session verfügbar).
+-- STATUS: Verifiziert (2026-07-24) — alle Spalten dieser Datei wurden per
+-- REST-API-Abfrage gegen die produktive Supabase-Datenbank bestätigt und
+-- existieren dort bereits.
 --
 -- Non-destruktiv: nur `add column if not exists` und
 -- `create index if not exists` auf den bereits in Etappe 2

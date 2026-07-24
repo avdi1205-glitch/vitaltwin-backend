@@ -31,13 +31,21 @@ def _all_migration_files() -> list[Path]:
     return sorted(MIGRATIONS_DIR.glob("*.sql"))
 
 
+def _numbered_migration_files() -> list[Path]:
+    """Only the sequentially numbered migration files (e.g. 001_...sql),
+    excluding convenience files like RUN_ONCE_combined_001_009.sql which
+    intentionally bundle several numbered migrations into one file and
+    aren't part of the numbering sequence themselves."""
+    return sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
+
+
 class TestMigrationsExistAndAreOrdered:
     def test_at_least_eight_migrations_exist(self):
-        files = _all_migration_files()
+        files = _numbered_migration_files()
         assert len(files) >= 8
 
     def test_migrations_are_sequentially_numbered(self):
-        files = _all_migration_files()
+        files = _numbered_migration_files()
         numbers = [int(f.name.split("_", 1)[0]) for f in files]
         assert numbers == sorted(numbers)
         assert numbers == list(range(1, len(numbers) + 1))

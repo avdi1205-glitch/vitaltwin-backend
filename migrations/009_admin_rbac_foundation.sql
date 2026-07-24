@@ -1,7 +1,8 @@
 -- VitalTwin Enterprise Release — Admin Control Center 1.0: RBAC Foundation.
 --
--- STATUS: Entwurf, NICHT gegen eine echte Datenbank ausgeführt (siehe alle
--- vorherigen Migrationsheader — kein DB-Zugriff in dieser Session verfügbar).
+-- STATUS: Verifiziert (2026-07-24) — alle Tabellen/Spalten dieser Datei
+-- wurden per REST-API-Abfrage gegen die produktive Supabase-Datenbank
+-- bestätigt und existieren dort bereits.
 --
 -- Non-destruktiv: nur `create table if not exists`, `add column if not
 -- exists` und `create index if not exists`. Keine bestehende Tabelle wird

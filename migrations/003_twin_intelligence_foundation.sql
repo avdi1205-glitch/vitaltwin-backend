@@ -1,13 +1,11 @@
 -- Twin Intelligence Core — Etappe 2: Datenmodelle, Migrationen, Validierung
 -- und Nutzertrennung.
 --
--- STATUS: Entwurf, NICHT gegen eine echte Datenbank ausgeführt. Diese Datei
--- ist zur manuellen Ausführung im Supabase SQL-Editor gedacht, exakt wie
--- 001_profile_wellness_foundation.sql und 002_chat_usage.sql. In dieser
--- Session stand keine Datenbankverbindung (SUPABASE_URL/SUPABASE_KEY) zur
--- Verfügung, daher konnte dieses Skript nur syntaktisch/inhaltlich geprüft,
--- nicht live ausgeführt werden. Siehe Abschlussbericht, Abschnitt "bekannte
--- Risiken".
+-- STATUS: Verifiziert (2026-07-24) — alle Tabellen/Spalten dieser Datei
+-- wurden per REST-API-Abfrage gegen die produktive Supabase-Datenbank
+-- bestätigt und existieren dort bereits. Diese Datei ist weiterhin sicher
+-- erneut ausführbar (siehe Non-destruktiv-Hinweis unten), z. B. beim Aufsetzen
+-- einer neuen Umgebung.
 --
 -- Non-destruktiv: ausschließlich `create table if not exists`,
 -- `add column if not exists` und `create index if not exists`. Keine
