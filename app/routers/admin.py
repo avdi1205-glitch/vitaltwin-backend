@@ -50,6 +50,9 @@ AUDIT_TABLE = "vt_audit_events"
 DAILY_ENTRY_TABLE = "vt_daily_wellness_entries"
 CHAT_USAGE_TABLE = "vt_chat_usage"
 TWIN_CALC_TABLE = "vt_twin_calculations"
+TWIN_MEMORY_TABLE = "vt_twin_memory"
+TWIN_LEARNING_EVENTS_TABLE = "vt_twin_learning_events"
+RECOMMENDATION_FEEDBACK_TABLE = "vt_recommendation_feedback"
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -397,10 +400,19 @@ async def get_audit_logs(limit: int = 50, authorization: str | None = Header(def
     require_admin_permission(authorization, "view_security")
     limit = max(1, min(limit, MAX_LIST_LIMIT))
     try:
-        rows = supabase.table(AUDIT_TABLE).select("*").order("created_at", desc=True).limit(limit).execute().data or []
+        response = (
+            supabase.table(AUDIT_TABLE)
+            .select("*", count="exact")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = response.data or []
+        total = response.count or 0
     except Exception:
         rows = []
-    return {"items": rows}
+        total = 0
+    return {"items": rows, "total": total}
 
 
 @router.get("/security/login-history")
@@ -408,10 +420,23 @@ async def get_global_login_history(limit: int = 50, authorization: str | None = 
     require_admin_permission(authorization, "view_security")
     limit = max(1, min(limit, MAX_LIST_LIMIT))
     try:
-        rows = supabase.table(LOGIN_EVENT_TABLE).select("*").order("created_at", desc=True).limit(limit).execute().data or []
+        response = (
+            supabase.table(LOGIN_EVENT_TABLE)
+            .select("*", count="exact")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = response.data or []
+        total = response.count or 0
+        failed_total = (
+            supabase.table(LOGIN_EVENT_TABLE).select("email", count="exact").eq("success", False).execute().count or 0
+        )
     except Exception:
         rows = []
-    return {"items": rows}
+        total = 0
+        failed_total = 0
+    return {"items": rows, "total": total, "failed_total": failed_total}
 
 
 @router.get("/security/permissions")
@@ -473,6 +498,37 @@ async def list_feedback(
         "note": (
             "Feedback, Bug Reports und Feature Requests laufen aktuell über ein gemeinsames Formular "
             "(`vt_user_feedback`) ohne separate Kategorisierung."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Twin Overview (Enterprise Admin Dashboard, Bereich 5)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/twin/overview")
+async def twin_overview(authorization: str | None = Header(default=None)):
+    require_admin_permission(authorization, "view_dashboard")
+
+    try:
+        calc_rows = supabase.table(TWIN_CALC_TABLE).select("email").execute().data or []
+    except Exception:
+        calc_rows = []
+    active_twins = len({row["email"] for row in calc_rows if row.get("email")})
+    total_calculations = len(calc_rows)
+
+    return {
+        "active_twins": active_twins,
+        "total_calculations": total_calculations,
+        "twin_memory_entries": _count_rows(TWIN_MEMORY_TABLE),
+        "learning_events": _count_rows(TWIN_LEARNING_EVENTS_TABLE),
+        "recommendation_feedback_count": _count_rows(RECOMMENDATION_FEEDBACK_TABLE),
+        "sub_twins_note": (
+            "Nutrition-, Sleep-, Movement- und Metabolic-Twin sind aktuell keine "
+            "eigenen Datenmodelle — VitalTwin berechnet einen kombinierten Score "
+            "(vt_twin_calculations: HbA1c, CRP, Vitamin D, ApoB). Eine Aufsplittung "
+            "in separate Sub-Twins ist nicht implementiert."
         ),
     }
 
