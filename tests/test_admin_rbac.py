@@ -61,8 +61,8 @@ class TestPermissionMatrix:
             "developer",
         }
 
-    def test_super_admin_has_all_twenty_two_permissions(self):
-        assert len(ROLE_PERMISSIONS["super_admin"]) == 22
+    def test_super_admin_has_all_twenty_four_permissions(self):
+        assert len(ROLE_PERMISSIONS["super_admin"]) == 24
 
     def test_only_super_admin_can_manage_roles(self):
         roles_with_manage_roles = {

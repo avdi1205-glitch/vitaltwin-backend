@@ -132,7 +132,13 @@ def get_affiliate_networks() -> list[IntegrationInfo]:
             category="affiliate_network",
             status="not_implemented",
             implemented=False,
-            note="Kein Netzwerk-API-Zugang angebunden. Datenmodell für Partner/Klicks/Verkäufe/Provisionen ist vorbereitet (siehe vt_affiliate_* Tabellen).",
+            note=(
+                "Kein Netzwerk-API-Zugang angebunden (kein automatischer Produkt-Import, kein automatischer "
+                "Provisions-Abgleich). Das generische Affiliate-Management-System selbst (Produkte, Freigabe-"
+                "Workflow, Tracking, Analytics, Blacklist, A/B-Tests) ist real implementiert — siehe "
+                "routers/affiliate_admin.py und routers/affiliate.py — Partnerprogramme wie dieses werden manuell "
+                "im Admin-Bereich unter Partnerprogramme angelegt und gepflegt."
+            ),
         )
         for identifier, name in definitions
     ]

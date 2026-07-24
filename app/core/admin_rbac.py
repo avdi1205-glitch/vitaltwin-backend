@@ -67,6 +67,8 @@ Permission = Literal[
     "manage_feature_flags",
     "view_support",
     "manage_support",
+    "view_affiliate",
+    "manage_affiliate",
 ]
 
 _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignore[attr-defined]
@@ -126,6 +128,7 @@ ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
             "view_business",
             "view_system_status",
             "view_integrations",
+            "view_affiliate",
         }
     ),
     "developer": frozenset(
