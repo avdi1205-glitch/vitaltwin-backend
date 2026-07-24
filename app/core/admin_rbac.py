@@ -71,6 +71,8 @@ Permission = Literal[
     "manage_affiliate",
     "view_founder_dashboard",
     "view_founder_briefing",
+    "view_founder_tasks",
+    "manage_founder_tasks",
 ]
 
 _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignore[attr-defined]
