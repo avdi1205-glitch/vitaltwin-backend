@@ -40,5 +40,15 @@ class TestExpiredSession:
 
     def test_tampered_signature_is_rejected(self):
         valid_token = _make_token(expires_delta=timedelta(days=30))
-        tampered = valid_token[:-1] + ("A" if valid_token[-1] != "A" else "B")
+        header, payload, signature = valid_token.split(".")
+        # Flip a character in the middle of the signature rather than the
+        # last character — the last base64url character of a JWT signature
+        # can, depending on padding/bit alignment, decode to the same
+        # underlying bytes even when changed, making that particular
+        # position an unreliable place to test tampering. A middle
+        # character always changes the decoded signature bytes.
+        mid = len(signature) // 2
+        flipped_char = "A" if signature[mid] != "A" else "B"
+        tampered_signature = signature[:mid] + flipped_char + signature[mid + 1 :]
+        tampered = f"{header}.{payload}.{tampered_signature}"
         assert get_email_by_token(tampered) is None

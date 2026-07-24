@@ -120,7 +120,7 @@ def _db_get_user(email: str) -> dict[str, object] | None:
     try:
         response = (
             supabase.table(USER_TABLE)
-            .select("email,full_name,password,premium")
+            .select("email,full_name,password,premium,suspended")
             .eq("email", email)
             .limit(1)
             .execute()
@@ -248,6 +248,7 @@ def _normalize_user_record(record: dict[str, object]) -> dict[str, object]:
         "password": record.get("password", ""),
         "full_name": record.get("full_name", ""),
         "premium": bool(record.get("premium", False)),
+        "suspended": bool(record.get("suspended", False)),
     }
 
 
@@ -274,6 +275,26 @@ def get_email_by_token(token: str | None) -> str | None:
         return None
     email = payload.get("sub")
     return str(email) if email else None
+
+
+def _record_login_event(*, email: str, success: bool, request: Request) -> None:
+    """Admin Control Center (Security Center / User Management 'Login
+    Historie') — best-effort, fire-and-forget, mirrors
+    `core/audit.py::record_audit_event`'s contract: a failed write here must
+    never block an actual login attempt."""
+    try:
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent")
+        supabase.table("vt_login_events").insert(
+            {
+                "email": email,
+                "success": success,
+                "ip_address": client_ip,
+                "user_agent": user_agent,
+            }
+        ).execute()
+    except Exception:
+        pass
 
 
 def set_premium_by_email(email: str, premium: bool) -> bool:
@@ -342,7 +363,14 @@ async def login(req: LoginRequest, request: Request):
 
     stored_password = str(user.get("password", "")) if user else ""
     if not user or not _verify_password(req.password, stored_password):
+        _record_login_event(email=email, success=False, request=request)
         raise HTTPException(status_code=401, detail="Ungueltige E-Mail oder Passwort")
+
+    if bool(user.get("suspended", False)):
+        # Admin Control Center: a suspended account must not be able to log
+        # in at all — otherwise "Nutzer sperren" would be purely decorative.
+        _record_login_event(email=email, success=False, request=request)
+        raise HTTPException(status_code=403, detail="Dieses Konto wurde gesperrt. Bitte kontaktiere den Support.")
 
     if not _is_hashed_password(stored_password):
         # Transparently migrate legacy plaintext passwords to a bcrypt hash on next login.
@@ -351,6 +379,7 @@ async def login(req: LoginRequest, request: Request):
         _db_update_password(email, migrated_hash)
 
     token = _create_access_token(email)
+    _record_login_event(email=email, success=True, request=request)
 
     return {
         "access_token": token,
