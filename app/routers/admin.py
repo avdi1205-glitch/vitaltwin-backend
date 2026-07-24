@@ -49,6 +49,7 @@ CONSENT_TABLE = "vt_consent_records"
 AUDIT_TABLE = "vt_audit_events"
 DAILY_ENTRY_TABLE = "vt_daily_wellness_entries"
 CHAT_USAGE_TABLE = "vt_chat_usage"
+TWIN_CALC_TABLE = "vt_twin_calculations"
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -481,13 +482,98 @@ async def list_feedback(
 # ---------------------------------------------------------------------------
 
 
+def _parse_dt(value: object) -> datetime | None:
+    """Parses a Supabase timestamptz value (ISO string, possibly with a
+    trailing 'Z') into a timezone-aware datetime, or None if unparseable."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _compute_growth_kpis(
+    users: list[dict], calc_times_by_email: dict[str, list[datetime]], now: datetime
+) -> dict:
+    """Computes the Master-Roadmap KPIs (Activation Rate, Time to Value,
+    Week-1/Week-4 Retention, "2+ Berechnungen in 30 Tagen") directly from
+    existing registration (`vt_users.created_at`) and calculation
+    (`vt_twin_calculations.created_at`) timestamps — no dedicated
+    event-tracking table is needed for these specific metrics, since a Twin
+    calculation already is the core "activation" action.
+
+    Returns None for any rate whose cohort isn't old enough yet to measure
+    (e.g. Week-4 retention needs registrations that are already >= 28 days
+    old) instead of a misleading 0% or 100%.
+    """
+    activated_24h = 0
+    ttv_seconds: list[float] = []
+    week1_eligible = week1_active = 0
+    week4_eligible = week4_active = 0
+    two_plus_eligible = two_plus_active = 0
+
+    for user in users:
+        reg_dt = _parse_dt(user.get("created_at"))
+        email = user.get("email")
+        if not reg_dt or not email:
+            continue
+        calc_times = calc_times_by_email.get(email, [])
+
+        first_calc = calc_times[0] if calc_times else None
+        if first_calc and (first_calc - reg_dt) <= timedelta(hours=24):
+            activated_24h += 1
+        if first_calc:
+            ttv_seconds.append((first_calc - reg_dt).total_seconds())
+
+        if now - reg_dt >= timedelta(days=7):
+            week1_eligible += 1
+            if any(reg_dt + timedelta(days=1) <= t <= reg_dt + timedelta(days=7) for t in calc_times):
+                week1_active += 1
+
+        if now - reg_dt >= timedelta(days=28):
+            week4_eligible += 1
+            if any(reg_dt + timedelta(days=22) <= t <= reg_dt + timedelta(days=28) for t in calc_times):
+                week4_active += 1
+
+        if now - reg_dt >= timedelta(days=30):
+            two_plus_eligible += 1
+            in_window = [t for t in calc_times if reg_dt <= t <= reg_dt + timedelta(days=30)]
+            if len(in_window) >= 2:
+                two_plus_active += 1
+
+    total_users = len(users)
+    median_ttv_hours = None
+    if ttv_seconds:
+        ttv_seconds.sort()
+        mid = len(ttv_seconds) // 2
+        median_seconds = (
+            ttv_seconds[mid] if len(ttv_seconds) % 2 else (ttv_seconds[mid - 1] + ttv_seconds[mid]) / 2
+        )
+        median_ttv_hours = round(median_seconds / 3600, 2)
+
+    return {
+        "activation_rate_24h": round(activated_24h / total_users, 3) if total_users else None,
+        "median_time_to_value_hours": median_ttv_hours,
+        "week1_retention_rate": round(week1_active / week1_eligible, 3) if week1_eligible else None,
+        "week4_retention_rate": round(week4_active / week4_eligible, 3) if week4_eligible else None,
+        "two_plus_calculations_30d_rate": (
+            round(two_plus_active / two_plus_eligible, 3) if two_plus_eligible else None
+        ),
+        "week1_retention_cohort_size": week1_eligible,
+        "week4_retention_cohort_size": week4_eligible,
+        "two_plus_calculations_cohort_size": two_plus_eligible,
+    }
+
+
 @router.get("/analytics/growth")
 async def analytics_growth(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_analytics")
     today = date.today()
+    now = datetime.now(timezone.utc)
 
     try:
-        all_users = supabase.table(USER_TABLE).select("created_at,premium").execute().data or []
+        all_users = supabase.table(USER_TABLE).select("email,created_at,premium").execute().data or []
     except Exception:
         all_users = []
 
@@ -510,6 +596,22 @@ async def analytics_growth(authorization: str | None = Header(default=None)):
     month_start = (today - timedelta(days=30)).isoformat()
     mau_30d = len({row["email"] for row in checkin_rows if str(row.get("entry_date", "")) >= month_start})
 
+    try:
+        calc_rows = supabase.table(TWIN_CALC_TABLE).select("email,created_at").execute().data or []
+    except Exception:
+        calc_rows = []
+
+    calc_times_by_email: dict[str, list[datetime]] = {}
+    for row in calc_rows:
+        email = row.get("email")
+        dt = _parse_dt(row.get("created_at"))
+        if email and dt:
+            calc_times_by_email.setdefault(email, []).append(dt)
+    for times in calc_times_by_email.values():
+        times.sort()
+
+    kpis = _compute_growth_kpis(all_users, calc_times_by_email, now)
+
     total_users = len(all_users)
     conversion_rate = round(premium_count / total_users, 3) if total_users else None
 
@@ -520,7 +622,13 @@ async def analytics_growth(authorization: str | None = Header(default=None)):
         "registrations_by_day": registrations_by_day,
         "dau_today": dau_today,
         "mau_30d": mau_30d,
-        "retention_note": "Kohorten-Retention erfordert ein dediziertes Event-Tracking-System — nicht implementiert.",
+        **kpis,
+        "retention_note": (
+            "Activation/TTV/Retention werden aus vt_users.created_at und "
+            "vt_twin_calculations.created_at berechnet (Twin-Berechnung als "
+            "Aktivierungs-Proxy). Werte sind null, solange keine Nutzer-Kohorte "
+            "alt genug ist (z. B. Week-4 braucht >= 28 Tage alte Registrierungen)."
+        ),
         "session_duration_note": "Keine Session-Dauer-Messung implementiert (kein Frontend-Analytics-Tracking).",
         "feature_usage_note": "Feature-Nutzung im Detail nicht aggregiert — Rohdaten liegen in den jeweiligen Fachtabellen vor.",
     }
