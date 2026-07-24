@@ -91,9 +91,9 @@ def founder_permission_spy(monkeypatch):
 
 class TestFounderDashboard:
     @pytest.mark.anyio
-    async def test_requires_view_founder_dashboard_permission(self, founder_supabase, founder_permission_spy):
+    async def test_requires_view_founder_os_permission(self, founder_supabase, founder_permission_spy):
         await founder_module.founder_dashboard(authorization="Bearer x")
-        assert founder_permission_spy[-1] == ("Bearer x", "view_founder_dashboard")
+        assert founder_permission_spy[-1] == ("Bearer x", "view_founder_os")
 
     @pytest.mark.anyio
     async def test_users_card_has_real_counts(self, founder_supabase, founder_permission_spy):

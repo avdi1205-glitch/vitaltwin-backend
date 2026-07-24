@@ -75,7 +75,7 @@ def _summary(tasks: list[dict]) -> dict:
 
 @router.get("/tasks")
 async def list_founder_tasks(authorization: str | None = Header(default=None)):
-    require_admin_permission(authorization, "view_founder_tasks")
+    require_admin_permission(authorization, "view_founder_os")
     run_detection()
     try:
         tasks = supabase.table(TASK_TABLE).select("*").order("created_at", desc=True).execute().data or []
@@ -86,7 +86,7 @@ async def list_founder_tasks(authorization: str | None = Header(default=None)):
 
 @router.patch("/tasks/{task_id}/status")
 async def update_task_status(task_id: str, data: StatusInput, authorization: str | None = Header(default=None)):
-    require_admin_permission(authorization, "manage_founder_tasks")
+    require_admin_permission(authorization, "manage_founder_os")
     payload = {"status": data.status, "updated_at": datetime.now(timezone.utc).isoformat()}
     if data.status == "erledigt":
         payload["resolved_at"] = datetime.now(timezone.utc).isoformat()
@@ -99,7 +99,7 @@ async def update_task_status(task_id: str, data: StatusInput, authorization: str
 
 @router.post("/tasks/{task_id}/remind")
 async def remind_later(task_id: str, authorization: str | None = Header(default=None)):
-    require_admin_permission(authorization, "manage_founder_tasks")
+    require_admin_permission(authorization, "manage_founder_os")
     remind_at = datetime.now(timezone.utc) + timedelta(hours=24)
     try:
         supabase.table(TASK_TABLE).update(
@@ -112,7 +112,7 @@ async def remind_later(task_id: str, authorization: str | None = Header(default=
 
 @router.post("/tasks/{task_id}/ignore")
 async def ignore_task(task_id: str, authorization: str | None = Header(default=None)):
-    require_admin_permission(authorization, "manage_founder_tasks")
+    require_admin_permission(authorization, "manage_founder_os")
     try:
         supabase.table(TASK_TABLE).update(
             {"status": "archiviert", "ignored": True, "updated_at": datetime.now(timezone.utc).isoformat()}
@@ -128,7 +128,7 @@ async def apply_suggestion(task_id: str, authorization: str | None = Header(defa
     ("Ausführung erfolgt nur nach Freigabe des Gründers") — but only for
     the single suggestion that is genuinely implemented: re-checking
     affiliate links. Any other task is refused with 400, never faked."""
-    require_admin_permission(authorization, "manage_founder_tasks")
+    require_admin_permission(authorization, "manage_founder_os")
     try:
         rows = supabase.table(TASK_TABLE).select("*").eq("id", task_id).limit(1).execute().data or []
     except Exception:

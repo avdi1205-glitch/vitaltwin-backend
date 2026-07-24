@@ -74,7 +74,7 @@ def _count(table: str, *, filters: dict[str, object] | None = None, gte: tuple[s
 
 @router.get("/daily-briefing")
 async def founder_daily_briefing(authorization: str | None = Header(default=None)):
-    require_admin_permission(authorization, "view_founder_briefing")
+    require_admin_permission(authorization, "view_founder_os")
 
     now = datetime.now(timezone.utc)
     today = date.today()

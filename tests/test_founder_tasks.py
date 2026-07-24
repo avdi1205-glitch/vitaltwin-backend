@@ -199,7 +199,7 @@ class TestFounderTasksRouter:
     @pytest.mark.anyio
     async def test_list_tasks_requires_view_permission(self, task_supabase, tasks_permission_spy):
         await tasks_module.list_founder_tasks(authorization="Bearer x")
-        assert tasks_permission_spy[-1] == ("Bearer x", "view_founder_tasks")
+        assert tasks_permission_spy[-1] == ("Bearer x", "view_founder_os")
 
     @pytest.mark.anyio
     async def test_list_tasks_runs_detection_and_returns_summary(self, task_supabase, tasks_permission_spy, monkeypatch):
@@ -213,7 +213,7 @@ class TestFounderTasksRouter:
         task_supabase.tables["vt_founder_tasks"] = [{"id": "t1", "status": "neu"}]
         data = tasks_module.StatusInput(status="in_bearbeitung")
         await tasks_module.update_task_status("t1", data, authorization="Bearer x")
-        assert tasks_permission_spy[-1] == ("Bearer x", "manage_founder_tasks")
+        assert tasks_permission_spy[-1] == ("Bearer x", "manage_founder_os")
         assert task_supabase.tables["vt_founder_tasks"][0]["status"] == "in_bearbeitung"
 
     @pytest.mark.anyio

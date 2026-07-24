@@ -64,10 +64,10 @@ def _empty_supabase(monkeypatch):
 
 class TestFounderDailyBriefing:
     @pytest.mark.anyio
-    async def test_requires_view_founder_briefing_permission(self, briefing_permission_spy, monkeypatch):
+    async def test_requires_view_founder_os_permission(self, briefing_permission_spy, monkeypatch):
         _empty_supabase(monkeypatch)
         await briefing_module.founder_daily_briefing(authorization="Bearer x")
-        assert briefing_permission_spy[-1] == ("Bearer x", "view_founder_briefing")
+        assert briefing_permission_spy[-1] == ("Bearer x", "view_founder_os")
 
     @pytest.mark.anyio
     async def test_no_stripe_revenue_is_honestly_none_with_note(self, briefing_permission_spy, monkeypatch):

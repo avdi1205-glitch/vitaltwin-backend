@@ -54,7 +54,7 @@ def _count(table: str, *, filters: dict[str, object] | None = None) -> int | Non
 
 @router.get("/dashboard")
 async def founder_dashboard(authorization: str | None = Header(default=None)):
-    require_admin_permission(authorization, "view_founder_dashboard")
+    require_admin_permission(authorization, "view_founder_os")
 
     today = date.today()
     week_ago = (today - timedelta(days=7)).isoformat()
