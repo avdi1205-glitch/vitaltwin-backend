@@ -51,6 +51,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Literal
 
 from .integrations import get_ai_providers, get_payment_providers
+from .concurrency import run_parallel
 from .supabase import supabase
 
 TASK_TABLE = "vt_founder_tasks"
@@ -311,11 +312,18 @@ def _detect_failed_login_spike() -> None:
 
 def run_detection() -> None:
     """Runs every implemented detection rule once. Called synchronously at
-    the start of `GET /api/admin/founder/tasks` — no scheduler, no queue."""
-    _detect_affiliate_broken_links()
-    _detect_affiliate_new_products_today()
-    _detect_affiliate_pending_approval()
-    _detect_stripe_not_configured()
-    _detect_openai_not_configured()
-    _detect_open_support_feedback()
-    _detect_failed_login_spike()
+    the start of `GET /api/admin/founder/tasks` — no scheduler, no queue.
+
+    Each detector writes to its own fixed `dedupe_key` (one aggregated
+    task per rule, not per row), so running all 7 concurrently instead of
+    one after another is safe — no two detectors ever touch the same
+    key."""
+    run_parallel(
+        _detect_affiliate_broken_links,
+        _detect_affiliate_new_products_today,
+        _detect_affiliate_pending_approval,
+        _detect_stripe_not_configured,
+        _detect_openai_not_configured,
+        _detect_open_support_feedback,
+        _detect_failed_login_spike,
+    )

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+from .concurrency import run_parallel
 from .supabase import supabase
 
 USER_TABLE = "vt_users"
@@ -81,63 +82,63 @@ def get_business_dashboard() -> dict:
     month_start = today.replace(day=1).isoformat()
     today_start = today.isoformat()
 
-    total_users = count_rows(USER_TABLE)
-    premium_users = count_rows(USER_TABLE, filters={"premium": True})
+    def _affiliate_revenue(since: str) -> float | None:
+        try:
+            events = (
+                supabase.table(AFFILIATE_EVENT_TABLE)
+                .select("revenue")
+                .eq("event_type", "conversion")
+                .gte("created_at", since)
+                .execute()
+                .data
+                or []
+            )
+            return sum(float(r.get("revenue") or 0) for r in events)
+        except Exception:
+            return None
+
+    def _open_tasks() -> int:
+        try:
+            return len(
+                [
+                    t
+                    for t in (supabase.table(TASK_TABLE).select("status").execute().data or [])
+                    if t.get("status") in ("neu", "in_bearbeitung", "warten")
+                ]
+            )
+        except Exception:
+            return 0
+
+    def _open_approvals() -> int:
+        try:
+            return len(
+                [
+                    a
+                    for a in (supabase.table(APPROVAL_TABLE).select("status").execute().data or [])
+                    if a.get("status") in ("neu", "ki_geprueft", "zur_pruefung")
+                ]
+            )
+        except Exception:
+            return 0
+
+    # All 6 lookups below are independent — run them concurrently instead
+    # of one after another.
+    (
+        total_users,
+        premium_users,
+        affiliate_revenue_today,
+        affiliate_revenue_month,
+        open_tasks,
+        open_approvals,
+    ) = run_parallel(
+        lambda: count_rows(USER_TABLE),
+        lambda: count_rows(USER_TABLE, filters={"premium": True}),
+        lambda: _affiliate_revenue(today_start),
+        lambda: _affiliate_revenue(month_start),
+        _open_tasks,
+        _open_approvals,
+    )
     conversion_rate = round(premium_users / total_users, 3) if total_users and premium_users is not None and total_users > 0 else None
-
-    affiliate_revenue_today = None
-    try:
-        events_today = (
-            supabase.table(AFFILIATE_EVENT_TABLE)
-            .select("revenue")
-            .eq("event_type", "conversion")
-            .gte("created_at", today_start)
-            .execute()
-            .data
-            or []
-        )
-        affiliate_revenue_today = sum(float(r.get("revenue") or 0) for r in events_today)
-    except Exception:
-        affiliate_revenue_today = None
-
-    affiliate_revenue_month = None
-    try:
-        events_month = (
-            supabase.table(AFFILIATE_EVENT_TABLE)
-            .select("revenue")
-            .eq("event_type", "conversion")
-            .gte("created_at", month_start)
-            .execute()
-            .data
-            or []
-        )
-        affiliate_revenue_month = sum(float(r.get("revenue") or 0) for r in events_month)
-    except Exception:
-        affiliate_revenue_month = None
-
-    open_tasks = count_rows(TASK_TABLE) or 0
-    try:
-        open_tasks = len(
-            [
-                t
-                for t in (supabase.table(TASK_TABLE).select("status").execute().data or [])
-                if t.get("status") in ("neu", "in_bearbeitung", "warten")
-            ]
-        )
-    except Exception:
-        open_tasks = 0
-
-    open_approvals = 0
-    try:
-        open_approvals = len(
-            [
-                a
-                for a in (supabase.table(APPROVAL_TABLE).select("status").execute().data or [])
-                if a.get("status") in ("neu", "ki_geprueft", "zur_pruefung")
-            ]
-        )
-    except Exception:
-        open_approvals = 0
 
     return {
         "computed_at": now.isoformat(),

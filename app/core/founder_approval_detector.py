@@ -54,6 +54,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta, timezone, datetime
 
+from .concurrency import run_parallel
 from .supabase import supabase
 
 APPROVAL_TABLE = "vt_founder_approvals"
@@ -258,9 +259,18 @@ def _detect_support_feedback() -> None:
 def run_detection() -> None:
     """Runs every implemented detection rule once. Called synchronously at
     the start of `GET /api/admin/founder/approvals` — no scheduler, no
-    queue, no background job."""
-    _detect_affiliate_products_pending_approval()
-    _detect_affiliate_broken_links()
-    _detect_expired_offers()
-    _detect_new_partner_programs()
-    _detect_support_feedback()
+    queue, no background job.
+
+    The 5 detectors below scan different tables/filters and write to
+    disjoint `dedupe_key` namespaces (each key is prefixed by the
+    detector's own type, e.g. `affiliate_product_pending_*` vs.
+    `affiliate_link_broken_*`), so running them concurrently instead of
+    one after another is safe — no two detectors ever race on the same
+    row/key."""
+    run_parallel(
+        _detect_affiliate_products_pending_approval,
+        _detect_affiliate_broken_links,
+        _detect_expired_offers,
+        _detect_new_partner_programs,
+        _detect_support_feedback,
+    )

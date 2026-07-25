@@ -34,6 +34,7 @@ from ..core.admin_rbac import require_admin_permission
 from ..core import automation_engine
 from ..core import executive_summary
 from ..core import documentation_score
+from ..core.concurrency import run_parallel
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -85,21 +86,102 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
     today_start = today.isoformat()
     yesterday_start = yesterday.isoformat()
 
-    # --- 1. Business -----------------------------------------------------------
-    affiliate_revenue_today = None
-    try:
-        events = (
-            supabase.table(AFFILIATE_EVENT_TABLE)
-            .select("revenue")
-            .eq("event_type", "conversion")
-            .gte("created_at", today_start)
-            .execute()
-            .data
-            or []
-        )
-        affiliate_revenue_today = sum(float(row.get("revenue") or 0) for row in events)
-    except Exception:
-        affiliate_revenue_today = None
+    def _affiliate_revenue_today() -> float | None:
+        try:
+            events = (
+                supabase.table(AFFILIATE_EVENT_TABLE)
+                .select("revenue")
+                .eq("event_type", "conversion")
+                .gte("created_at", today_start)
+                .execute()
+                .data
+                or []
+            )
+            return sum(float(row.get("revenue") or 0) for row in events)
+        except Exception:
+            return None
+
+    def _active_users_today() -> int | None:
+        try:
+            active_rows = (
+                supabase.table(DAILY_ENTRY_TABLE).select("email").eq("entry_date", today_start).execute().data or []
+            )
+            return len({row["email"] for row in active_rows if row.get("email")})
+        except Exception:
+            return None
+
+    def _ai_requests_today() -> int | None:
+        try:
+            usage_rows = supabase.table(CHAT_USAGE_TABLE).select("count").eq("usage_date", today_start).execute().data or []
+            return sum(int(row.get("count", 0)) for row in usage_rows)
+        except Exception:
+            return None
+
+    def _top_products() -> list[dict]:
+        try:
+            conversions = (
+                supabase.table(AFFILIATE_EVENT_TABLE).select("product_id,revenue").eq("event_type", "conversion").execute().data
+                or []
+            )
+            revenue_by_product: dict[str, float] = {}
+            for row in conversions:
+                pid = str(row.get("product_id"))
+                revenue_by_product[pid] = revenue_by_product.get(pid, 0.0) + float(row.get("revenue") or 0)
+            if not revenue_by_product:
+                return []
+            product_rows = supabase.table(AFFILIATE_PRODUCT_TABLE).select("id,title").execute().data or []
+            title_by_id = {str(p["id"]): p.get("title", "—") for p in product_rows}
+            return [
+                {"product_id": pid, "title": title_by_id.get(pid, "—"), "revenue": revenue}
+                for pid, revenue in sorted(revenue_by_product.items(), key=lambda kv: kv[1], reverse=True)[:3]
+            ]
+        except Exception:
+            return []
+
+    def _database_reachable() -> bool:
+        return _count(USER_TABLE) is not None
+
+    # All 14 lookups below are independent — run them concurrently instead
+    # of one after another (this used to be the slowest single endpoint in
+    # the whole Founder Operating System, with ~55-60 sequential blocking
+    # calls once the 3 cross-module summaries are counted).
+    (
+        affiliate_revenue_today,
+        new_users_today,
+        new_users_yesterday,
+        active_users_today,
+        ai_requests_today,
+        new_products_today,
+        pending_approval,
+        broken_links,
+        top_products,
+        database_reachable,
+        new_feedback_today,
+        automation_summary,
+        ceo_summary,
+        documentation_summary,
+    ) = run_parallel(
+        _affiliate_revenue_today,
+        lambda: _count(USER_TABLE, gte=("created_at", today_start)),
+        lambda: _count(USER_TABLE, gte=("created_at", yesterday_start)),
+        _active_users_today,
+        _ai_requests_today,
+        lambda: _count(AFFILIATE_PRODUCT_TABLE, gte=("created_at", today_start)),
+        lambda: _count(AFFILIATE_PRODUCT_TABLE, filters={"status": "in_review"}),
+        lambda: _count(AFFILIATE_PRODUCT_TABLE, filters={"link_status": "broken"}),
+        _top_products,
+        _database_reachable,
+        lambda: _count(FEEDBACK_TABLE, gte=("created_at", today_start)),
+        _automation_summary,
+        _ceo_summary,
+        _documentation_summary,
+    )
+
+    if new_users_yesterday is not None and new_users_today is not None:
+        # gte("created_at", yesterday_start) includes today too, so isolate yesterday-only.
+        new_users_yesterday_only: int | None = max(new_users_yesterday - new_users_today, 0)
+    else:
+        new_users_yesterday_only = None
 
     business = {
         "revenue_today": None,
@@ -113,24 +195,6 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "affiliate_revenue_today": affiliate_revenue_today,
     }
 
-    # --- 2. Nutzer ---------------------------------------------------------------
-    new_users_today = _count(USER_TABLE, gte=("created_at", today_start))
-    new_users_yesterday = _count(USER_TABLE, gte=("created_at", yesterday_start))
-    if new_users_yesterday is not None and new_users_today is not None:
-        # gte("created_at", yesterday_start) includes today too, so isolate yesterday-only.
-        new_users_yesterday_only: int | None = max(new_users_yesterday - new_users_today, 0)
-    else:
-        new_users_yesterday_only = None
-
-    active_users_today = None
-    try:
-        active_rows = (
-            supabase.table(DAILY_ENTRY_TABLE).select("email").eq("entry_date", today_start).execute().data or []
-        )
-        active_users_today = len({row["email"] for row in active_rows if row.get("email")})
-    except Exception:
-        active_users_today = None
-
     users = {
         "new_today": new_users_today,
         "active_today": active_users_today,
@@ -139,14 +203,6 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "cancellations": None,
         "cancellations_note": NO_CANCELLATION_NOTE,
     }
-
-    # --- 3. KI ---------------------------------------------------------------------
-    ai_requests_today = None
-    try:
-        usage_rows = supabase.table(CHAT_USAGE_TABLE).select("count").eq("usage_date", today_start).execute().data or []
-        ai_requests_today = sum(int(row.get("count", 0)) for row in usage_rows)
-    except Exception:
-        ai_requests_today = None
 
     ai = {
         "requests_today": ai_requests_today,
@@ -158,31 +214,6 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "slow_responses_note": NO_LATENCY_NOTE,
     }
 
-    # --- 4. Affiliate ----------------------------------------------------------------
-    new_products_today = _count(AFFILIATE_PRODUCT_TABLE, gte=("created_at", today_start))
-    pending_approval = _count(AFFILIATE_PRODUCT_TABLE, filters={"status": "in_review"})
-    broken_links = _count(AFFILIATE_PRODUCT_TABLE, filters={"link_status": "broken"})
-
-    top_products: list[dict] = []
-    try:
-        conversions = (
-            supabase.table(AFFILIATE_EVENT_TABLE).select("product_id,revenue").eq("event_type", "conversion").execute().data
-            or []
-        )
-        revenue_by_product: dict[str, float] = {}
-        for row in conversions:
-            pid = str(row.get("product_id"))
-            revenue_by_product[pid] = revenue_by_product.get(pid, 0.0) + float(row.get("revenue") or 0)
-        if revenue_by_product:
-            product_rows = supabase.table(AFFILIATE_PRODUCT_TABLE).select("id,title").execute().data or []
-            title_by_id = {str(p["id"]): p.get("title", "—") for p in product_rows}
-            top_products = [
-                {"product_id": pid, "title": title_by_id.get(pid, "—"), "revenue": revenue}
-                for pid, revenue in sorted(revenue_by_product.items(), key=lambda kv: kv[1], reverse=True)[:3]
-            ]
-    except Exception:
-        top_products = []
-
     affiliate = {
         "new_products_today": new_products_today,
         "pending_approval": pending_approval,
@@ -191,7 +222,6 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
     }
 
     # --- 5. System -------------------------------------------------------------------
-    database_reachable = _count(USER_TABLE) is not None
     system = {
         "server_status": None,
         "server_status_note": NO_SERVER_MONITORING_NOTE,
@@ -204,7 +234,6 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
     }
 
     # --- 6. Aufgaben (automatisch generiert) ------------------------------------------
-    new_feedback_today = _count(FEEDBACK_TABLE, gte=("created_at", today_start))
     tasks = [
         {"label": "Produkte prüfen", "value": pending_approval, "note": None},
         {"label": "Releases prüfen", "value": None, "note": NO_RELEASE_TRACKING_NOTE},
@@ -274,9 +303,9 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "warnings": warnings,
         "recommendations": recommendations,
         "priorities": priorities,
-        "automation": _automation_summary(),
-        "ceo_summary": _ceo_summary(),
-        "documentation": _documentation_summary(),
+        "automation": automation_summary,
+        "ceo_summary": ceo_summary,
+        "documentation": documentation_summary,
     }
 
 

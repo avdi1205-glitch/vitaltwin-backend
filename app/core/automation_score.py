@@ -15,6 +15,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from .automation_registry import AUTOMATION_CATEGORIES
+from .concurrency import run_parallel
 from .supabase import supabase
 
 RUN_TABLE = "vt_automation_runs"
@@ -30,30 +31,39 @@ def _window_start(days: int) -> str:
 
 
 def _period_stats(start_iso: str, end_iso: str | None) -> dict:
-    query = supabase.table(RUN_TABLE).select("status").gte("created_at", start_iso)
-    if end_iso:
-        query = query.lt("created_at", end_iso)
-    try:
-        runs = query.execute().data or []
-    except Exception:
-        runs = []
+    def _runs() -> list[dict]:
+        query = supabase.table(RUN_TABLE).select("status").gte("created_at", start_iso)
+        if end_iso:
+            query = query.lt("created_at", end_iso)
+        try:
+            return query.execute().data or []
+        except Exception:
+            return []
+
+    def _manual_tasks() -> list[dict]:
+        try:
+            return (
+                supabase.table(TASK_TABLE).select("status,auto_resolved")
+                .eq("status", "erledigt").eq("auto_resolved", False).gte("updated_at", start_iso).execute().data or []
+            )
+        except Exception:
+            return []
+
+    def _manual_approvals() -> list[dict]:
+        try:
+            return (
+                supabase.table(APPROVAL_TABLE).select("status")
+                .in_("status", ["freigegeben", "abgelehnt"]).gte("updated_at", start_iso).execute().data or []
+            )
+        except Exception:
+            return []
+
+    # The 3 lookups above are fully independent — run them concurrently
+    # instead of one after another.
+    runs, manual_tasks, manual_approvals = run_parallel(_runs, _manual_tasks, _manual_approvals)
+
     automated = sum(1 for r in runs if r.get("status") == "erfolgreich")
     failed = sum(1 for r in runs if r.get("status") in ("fehlgeschlagen", "dead_letter"))
-
-    try:
-        manual_tasks = (
-            supabase.table(TASK_TABLE).select("status,auto_resolved")
-            .eq("status", "erledigt").eq("auto_resolved", False).gte("updated_at", start_iso).execute().data or []
-        )
-    except Exception:
-        manual_tasks = []
-    try:
-        manual_approvals = (
-            supabase.table(APPROVAL_TABLE).select("status")
-            .in_("status", ["freigegeben", "abgelehnt"]).gte("updated_at", start_iso).execute().data or []
-        )
-    except Exception:
-        manual_approvals = []
     manual = len(manual_tasks) + len(manual_approvals)
 
     total = automated + manual
@@ -65,27 +75,38 @@ def compute_automation_score() -> dict:
     current_start = _window_start(WINDOW_DAYS)
     previous_start = _window_start(WINDOW_DAYS * 2)
 
-    current = _period_stats(current_start, None)
-    previous = _period_stats(previous_start, current_start)
+    def _rules() -> list[dict]:
+        try:
+            return supabase.table(RULE_TABLE).select("category").execute().data or []
+        except Exception:
+            return []
+
+    def _manual_tasks_all() -> list[dict]:
+        try:
+            return (
+                supabase.table(TASK_TABLE).select("category").eq("status", "erledigt").eq("auto_resolved", False)
+                .gte("updated_at", current_start).execute().data or []
+            )
+        except Exception:
+            return []
+
+    # `current`/`previous` (each internally already parallel, see
+    # `_period_stats`) and the 2 category lookups below are all
+    # independent of each other — run all 4 branches concurrently.
+    current, previous, rules, manual_tasks_all = run_parallel(
+        lambda: _period_stats(current_start, None),
+        lambda: _period_stats(previous_start, current_start),
+        _rules,
+        _manual_tasks_all,
+    )
 
     trend = None
     if current["percentage"] is not None and previous["percentage"] is not None:
         trend = current["percentage"] - previous["percentage"]
 
-    try:
-        rules = supabase.table(RULE_TABLE).select("category").execute().data or []
-    except Exception:
-        rules = []
     rules_by_category = Counter(r.get("category") for r in rules if r.get("category"))
-
-    try:
-        manual_tasks_all = (
-            supabase.table(TASK_TABLE).select("category").eq("status", "erledigt").eq("auto_resolved", False)
-            .gte("updated_at", current_start).execute().data or []
-        )
-    except Exception:
-        manual_tasks_all = []
     manual_by_category = Counter(t.get("category") for t in manual_tasks_all if t.get("category"))
+
 
     category_breakdown = []
     gaps = []

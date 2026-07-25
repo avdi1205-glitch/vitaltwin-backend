@@ -29,6 +29,7 @@ from typing import Literal
 
 from . import automation_score as automation_score_module
 from . import founder_business_metrics as metrics
+from .concurrency import run_parallel
 from .integrations import get_full_integration_report
 from .supabase import supabase
 
@@ -99,27 +100,54 @@ def _affiliate_impressions_clicks(days: int = 7) -> tuple[int | None, int | None
 
 
 def get_ceo_overview() -> dict:
-    dashboard = metrics.get_business_dashboard()
-    this_week_users, previous_week_users = metrics.get_weekly_new_users()
-    active_users = _active_users_7d()
-    total_users = _total_registrations()
-    premium_users = metrics.count_rows("vt_users", filters={"premium": True})
-    automation = automation_score_module.compute_automation_score()
+    def _open_tasks_rows() -> list[dict]:
+        try:
+            return supabase.table("vt_founder_tasks").select("status").execute().data or []
+        except Exception:
+            return []
 
-    try:
-        open_tasks = len([t for t in (supabase.table("vt_founder_tasks").select("status").execute().data or []) if t.get("status") in ("neu", "in_bearbeitung", "warten")])
-    except Exception:
-        open_tasks = 0
-    try:
-        approvals = supabase.table("vt_founder_approvals").select("status,priority").execute().data or []
-    except Exception:
-        approvals = []
+    def _approvals_rows() -> list[dict]:
+        try:
+            return supabase.table("vt_founder_approvals").select("status,priority").execute().data or []
+        except Exception:
+            return []
+
+    def _insights_rows() -> list[dict]:
+        try:
+            return supabase.table("vt_founder_business_insights").select("category,status").execute().data or []
+        except Exception:
+            return []
+
+    # All 8 lookups below are independent — run them concurrently instead
+    # of one after another (several of them are themselves already
+    # internally parallel, e.g. get_business_dashboard/compute_automation_score).
+    (
+        dashboard,
+        (this_week_users, previous_week_users),
+        active_users,
+        total_users,
+        premium_users,
+        automation,
+        open_tasks_rows,
+        approvals,
+        insights,
+        documentation_health,
+    ) = run_parallel(
+        metrics.get_business_dashboard,
+        metrics.get_weekly_new_users,
+        _active_users_7d,
+        _total_registrations,
+        lambda: metrics.count_rows("vt_users", filters={"premium": True}),
+        automation_score_module.compute_automation_score,
+        _open_tasks_rows,
+        _approvals_rows,
+        _insights_rows,
+        _documentation_health_metric,
+    )
+
+    open_tasks = len([t for t in open_tasks_rows if t.get("status") in ("neu", "in_bearbeitung", "warten")])
     open_approvals = len([a for a in approvals if a.get("status") in ("neu", "ki_geprueft", "zur_pruefung")])
 
-    try:
-        insights = supabase.table("vt_founder_business_insights").select("category,status").execute().data or []
-    except Exception:
-        insights = []
     open_insight_statuses = {"erkannt", "geprueft", "zur_freigabe_gesendet"}
     open_risks = len([i for i in insights if "risiko" in (i.get("category") or "") and i.get("status") in open_insight_statuses])
     open_opportunities = len([i for i in insights if "chance" in (i.get("category") or "") and i.get("status") in open_insight_statuses])
@@ -148,7 +176,7 @@ def get_ceo_overview() -> dict:
         "automation_percentage": _metric(automation.get("overall_percentage"), source="vt_automation_runs", note=automation.get("note")),
         "product_status": _metric(None, source="nicht verbunden", note=NO_RELEASE_NOTE),
         "release_status": _metric(None, source="nicht verbunden", note=NO_RELEASE_NOTE),
-        "documentation_health": _documentation_health_metric(),
+        "documentation_health": documentation_health,
     }
 
 
@@ -170,34 +198,57 @@ def _documentation_health_metric() -> dict:
 
 
 def get_strategic_kpis() -> dict:
-    dashboard = metrics.get_business_dashboard()
-    this_week_users, previous_week_users = metrics.get_weekly_new_users()
-    automation = automation_score_module.compute_automation_score()
-    impressions_7d, clicks_7d = _affiliate_impressions_clicks(7)
+    def _conversions_7d() -> int:
+        try:
+            return len(
+                [e for e in (supabase.table(AFFILIATE_EVENT_TABLE).select("event_type,revenue,commission").gte(
+                    "created_at", (date.today() - timedelta(days=7)).isoformat()).execute().data or [])
+                 if e.get("event_type") == "conversion"]
+            )
+        except Exception:
+            return 0
+
+    def _broken_links() -> int:
+        try:
+            return metrics.count_rows(AFFILIATE_PRODUCT_TABLE, filters={"link_status": "broken"}) or 0
+        except Exception:
+            return 0
+
+    # All 9 lookups below are independent — run them concurrently instead
+    # of one after another.
+    (
+        dashboard,
+        (this_week_users, previous_week_users),
+        automation,
+        (impressions_7d, clicks_7d),
+        conversions_7d,
+        broken_links,
+        integration_report,
+        total_registrations,
+        active_users_7d,
+        affiliate_revenue_by_category,
+        weekly_feedback_counts,
+    ) = run_parallel(
+        metrics.get_business_dashboard,
+        metrics.get_weekly_new_users,
+        automation_score_module.compute_automation_score,
+        lambda: _affiliate_impressions_clicks(7),
+        _conversions_7d,
+        _broken_links,
+        get_full_integration_report,
+        _total_registrations,
+        _active_users_7d,
+        lambda: metrics.get_affiliate_revenue_by_category(days=7),
+        metrics.get_weekly_feedback_counts,
+    )
     ctr = round(clicks_7d / impressions_7d * 100, 2) if impressions_7d else None
-
-    try:
-        conversions_7d = len(
-            [e for e in (supabase.table(AFFILIATE_EVENT_TABLE).select("event_type,revenue,commission").gte(
-                "created_at", (date.today() - timedelta(days=7)).isoformat()).execute().data or [])
-             if e.get("event_type") == "conversion"]
-        )
-    except Exception:
-        conversions_7d = 0
-
-    try:
-        broken_links = metrics.count_rows(AFFILIATE_PRODUCT_TABLE, filters={"link_status": "broken"}) or 0
-    except Exception:
-        broken_links = 0
-
-    integration_report = get_full_integration_report()
     ai_providers_configured = sum(1 for p in integration_report.get("ai_providers", []) if p.get("status") == "configured")
 
     return {
         "nutzer": {
-            "gesamtregistrierungen": _metric(_total_registrations(), source="vt_users"),
+            "gesamtregistrierungen": _metric(total_registrations, source="vt_users"),
             "neue_nutzer_7d": _metric(this_week_users, source="vt_users", trend=_pct_trend(this_week_users, previous_week_users)),
-            "aktive_nutzer_7d": _metric(_active_users_7d(), source="vt_daily_wellness_entries"),
+            "aktive_nutzer_7d": _metric(active_users_7d, source="vt_daily_wellness_entries"),
             "taeglich_aktive_nutzer": _metric(None, source="nicht verbunden", note=NO_FUNNEL_NOTE),
             "monatlich_aktive_nutzer": _metric(None, source="nicht verbunden", note=NO_FUNNEL_NOTE),
             "aktivierungsrate": _metric(None, source="nicht verbunden", note=NO_FUNNEL_NOTE),
@@ -230,7 +281,7 @@ def get_strategic_kpis() -> dict:
             "ctr": _metric(ctr, source="vt_affiliate_events"),
             "verkaeufe_7d": _metric(conversions_7d, source="vt_affiliate_events"),
             "conversion": _metric(round(conversions_7d / clicks_7d * 100, 2) if clicks_7d else None, source="vt_affiliate_events"),
-            "umsatz_nach_kategorie": _metric(metrics.get_affiliate_revenue_by_category(days=7), source="vt_affiliate_events × vt_affiliate_products × vt_affiliate_categories"),
+            "umsatz_nach_kategorie": _metric(affiliate_revenue_by_category, source="vt_affiliate_events × vt_affiliate_products × vt_affiliate_categories"),
             "defekte_links": _metric(broken_links, source="vt_affiliate_products"),
         },
         "ki": {
@@ -249,7 +300,7 @@ def get_strategic_kpis() -> dict:
             "abbruchpunkte": _metric(None, source="nicht verbunden", note=NO_FUNNEL_NOTE),
             "meistgenutzte_funktionen": _metric(None, source="nicht verbunden", note=NO_FUNNEL_NOTE),
             "wenig_genutzte_funktionen": _metric(None, source="nicht verbunden", note=NO_FUNNEL_NOTE),
-            "supportsignale": _metric(metrics.get_weekly_feedback_counts()[0], source="vt_user_feedback"),
+            "supportsignale": _metric(weekly_feedback_counts[0], source="vt_user_feedback"),
         },
         "technik": {
             "uptime": _metric(None, source="nicht verbunden", note=NO_APM_NOTE),
