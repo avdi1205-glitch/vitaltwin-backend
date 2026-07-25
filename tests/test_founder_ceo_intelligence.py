@@ -144,7 +144,7 @@ def ceo_permission_spy(monkeypatch):
 
 class TestRbacMatrix:
     def test_executive_analyst_is_read_only(self):
-        assert ROLE_PERMISSIONS["executive_analyst"] == {"view_ceo_intelligence"}
+        assert ROLE_PERMISSIONS["executive_analyst"] == {"view_ceo_intelligence", "view_founder_autopilot"}
 
     def test_admin_excluded_from_ceo_intelligence(self):
         assert not role_has_permission("admin", "view_ceo_intelligence")

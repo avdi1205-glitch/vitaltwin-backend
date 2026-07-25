@@ -80,6 +80,8 @@ Permission = Literal[
     "manage_ceo_intelligence",
     "view_documentation",
     "manage_documentation",
+    "view_founder_autopilot",
+    "manage_founder_autopilot",
 ]
 
 _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignore[attr-defined]
@@ -132,6 +134,12 @@ _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignor
 #   permission alone — `developer` also gets both Submodule I permissions
 #   (explicit, deliberate grant per spec: "ausdrücklich freigegebener
 #   developer"), since technical staff routinely maintain documentation.
+# - Submodule J (Founder Autopilot): the spec is stricter than every prior
+#   submodule — ONLY `super_admin` may ever configure it at all (no
+#   narrow "autopilot_manager"-style role exists, unlike G/H/I).
+#   `executive_analyst` additionally gets `view_founder_autopilot`
+#   (read-only, same role reused across H and J per spec's explicit
+#   "ausdrücklich freigegebene executive_analyst-Rolle").
 ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
     "super_admin": frozenset(_ALL_PERMISSIONS),  # type: ignore[arg-type]
     "admin": frozenset(
@@ -141,10 +149,11 @@ ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
             "view_automation_engine", "manage_automation_engine",
             "view_ceo_intelligence", "manage_ceo_intelligence",
             "view_documentation", "manage_documentation",
+            "view_founder_autopilot", "manage_founder_autopilot",
         }
     ),  # type: ignore[arg-type]
     "automation_manager": frozenset({"view_automation_engine", "manage_automation_engine"}),
-    "executive_analyst": frozenset({"view_ceo_intelligence"}),
+    "executive_analyst": frozenset({"view_ceo_intelligence", "view_founder_autopilot"}),
     "documentation_editor": frozenset({"view_documentation", "manage_documentation"}),
     "support": frozenset(
         {
