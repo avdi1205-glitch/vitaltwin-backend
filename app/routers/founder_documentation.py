@@ -27,6 +27,7 @@ from ..core import documentation_stale_detection as stale_module
 from ..core import release_notes_engine
 from ..core.admin_rbac import require_admin_permission
 from ..core.audit import record_audit_event
+from ..core.concurrency import run_parallel
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
 from ..services.ai_provider import AIProvider, AIProviderError, OpenAIProvider
@@ -96,13 +97,23 @@ async def documentation_dashboard(authorization: str | None = Header(default=Non
 
     documents = registry_module.list_documents()
     stale = [d for d in documents if d.get("status") == "stale"]
-    missing = stale_module.detect_missing_documentation()
     pending_review = [d for d in documents if d.get("status") == "pending_review"]
 
-    try:
-        runs = supabase.table(RUN_TABLE).select("*").order("created_at", desc=True).limit(20).execute().data or []
-    except Exception:
-        runs = []
+    def _runs() -> list[dict]:
+        try:
+            return supabase.table(RUN_TABLE).select("*").order("created_at", desc=True).limit(20).execute().data or []
+        except Exception:
+            return []
+
+    # These 4 are independent of each other (and of the `documents` list
+    # above, which only needed `seed_known_documents()` to have finished
+    # first) — run them concurrently.
+    missing, runs, doc_score, automation_score = run_parallel(
+        stale_module.detect_missing_documentation,
+        _runs,
+        score_module.compute_documentation_score,
+        score_module.compute_documentation_automation_score,
+    )
     last_run = runs[0] if runs else None
     last_successful_run = next((r for r in runs if r.get("status") == "erfolgreich"), None)
     failed_runs = sum(1 for r in runs if r.get("status") == "fehlgeschlagen")
@@ -118,9 +129,6 @@ async def documentation_dashboard(authorization: str | None = Header(default=Non
     migration_files_documented = {f for d in documents if d.get("category") == "migrationen" for f in (d.get("source_files") or [])}
     all_migration_files = {m["file"] for m in scanner.scan_migrations()}
     undocumented_migrations = len(all_migration_files - migration_files_documented)
-
-    doc_score = score_module.compute_documentation_score()
-    automation_score = score_module.compute_documentation_automation_score()
 
     return {
         "total_documents": len(documents),

@@ -46,6 +46,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 from . import founder_business_metrics as metrics
+from .concurrency import run_parallel
 from .supabase import supabase
 
 INSIGHT_TABLE = "vt_founder_business_insights"
@@ -229,10 +230,14 @@ def _detect_support_volume_change() -> None:
 def run_insight_detection() -> None:
     """Runs every implemented insight rule once. Called synchronously from
     `GET /api/admin/founder/business-coach/dashboard` — no scheduler, no
-    background job, matching every other Founder-OS module."""
-    _detect_user_growth()
-    _detect_affiliate_category_change()
-    _detect_support_volume_change()
+    background job, matching every other Founder-OS module. The 3
+    detectors write to disjoint dedupe_key prefixes, so running them
+    concurrently instead of one after another is safe."""
+    run_parallel(
+        _detect_user_growth,
+        _detect_affiliate_category_change,
+        _detect_support_volume_change,
+    )
 
 
 def send_insight_to_task_manager(insight: dict, *, admin_email: str) -> dict | None:

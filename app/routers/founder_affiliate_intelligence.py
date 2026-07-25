@@ -38,6 +38,7 @@ from ..core.affiliate_intelligence_detector import run_affiliate_intelligence_de
 from ..core.affiliate_product_health import compute_product_health
 from ..core.affiliate_review_rules import review_product_rule_based, summarize_approval_assistant
 from ..core.audit import record_audit_event
+from ..core.concurrency import run_parallel
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
 from ..services.ai_provider import AIProvider, AIProviderError, OpenAIProvider
@@ -144,24 +145,72 @@ def _open_duplicate_product_ids() -> set[str]:
 @router.get("/affiliate-intelligence/dashboard")
 async def affiliate_intelligence_dashboard(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_founder_os")
-    run_affiliate_intelligence_detection()
-    founder_approval_detector.run_detection()  # Keeps existing per-item affiliate approvals fresh — no duplicate logic.
 
     today = date.today()
     today_start = today.isoformat()
     month_start = today.replace(day=1).isoformat()
     soon = (today + timedelta(days=7)).isoformat()
 
-    try:
-        products = supabase.table(PRODUCT_TABLE).select("*").execute().data or []
-    except Exception:
-        products = []
-    try:
-        partners = supabase.table(PARTNER_TABLE).select("*").execute().data or []
-    except Exception:
-        partners = []
+    def _products() -> list[dict]:
+        try:
+            return supabase.table(PRODUCT_TABLE).select("*").execute().data or []
+        except Exception:
+            return []
 
-    providers = provider_module.get_provider_statuses()
+    def _partners() -> list[dict]:
+        try:
+            return supabase.table(PARTNER_TABLE).select("*").execute().data or []
+        except Exception:
+            return []
+
+    def _events_today() -> list[dict]:
+        try:
+            return supabase.table(EVENT_TABLE).select("event_type,revenue,commission").gte("created_at", today_start).execute().data or []
+        except Exception:
+            return []
+
+    def _events_month() -> list[dict]:
+        try:
+            return supabase.table(EVENT_TABLE).select("event_type,revenue,commission").gte("created_at", month_start).execute().data or []
+        except Exception:
+            return []
+
+    def _open_tasks() -> int:
+        try:
+            return len([t for t in (supabase.table(TASK_TABLE).select("status,category").execute().data or []) if t.get("category") == "affiliate" and t.get("status") in ("neu", "in_bearbeitung", "warten")])
+        except Exception:
+            return 0
+
+    def _open_approvals() -> int:
+        try:
+            return len([a for a in (supabase.table(APPROVAL_TABLE).select("status,category").execute().data or []) if a.get("category") in ("affiliate", "business") and a.get("status") in ("neu", "ki_geprueft", "zur_pruefung")])
+        except Exception:
+            return 0
+
+    # All 9 branches below are independent of each other (the 2 detection
+    # runs write to their own tables and aren't read by anything else in
+    # this function) — run them concurrently instead of one after another.
+    (
+        _,
+        _,
+        products,
+        partners,
+        providers,
+        events_today,
+        events_month,
+        open_tasks,
+        open_approvals,
+    ) = run_parallel(
+        run_affiliate_intelligence_detection,
+        founder_approval_detector.run_detection,  # Keeps existing per-item affiliate approvals fresh — no duplicate logic.
+        _products,
+        _partners,
+        provider_module.get_provider_statuses,
+        _events_today,
+        _events_month,
+        _open_tasks,
+        _open_approvals,
+    )
 
     new_products_today = sum(1 for p in products if str(p.get("created_at", "")) >= today_start)
     pending_approval = sum(1 for p in products if p.get("status") == "in_review")
@@ -171,30 +220,12 @@ async def affiliate_intelligence_dashboard(authorization: str | None = Header(de
     expiring_soon = sum(1 for p in products if p.get("end_date") and today_start <= str(p["end_date"]) <= soon)
     checked_products = sum(1 for p in products if p.get("link_last_checked_at"))
 
-    try:
-        events_today = supabase.table(EVENT_TABLE).select("event_type,revenue,commission").gte("created_at", today_start).execute().data or []
-    except Exception:
-        events_today = []
-    try:
-        events_month = supabase.table(EVENT_TABLE).select("event_type,revenue,commission").gte("created_at", month_start).execute().data or []
-    except Exception:
-        events_month = []
-
     impressions_today = sum(1 for e in events_today if e.get("event_type") == "impression")
     clicks_today = sum(1 for e in events_today if e.get("event_type") == "click")
     conversions_today = sum(1 for e in events_today if e.get("event_type") == "conversion")
     commission_today = sum(float(e.get("commission") or 0) for e in events_today if e.get("event_type") == "conversion")
     commission_month = sum(float(e.get("commission") or 0) for e in events_month if e.get("event_type") == "conversion")
     conversion_rate = round(conversions_today / clicks_today, 3) if clicks_today else None
-
-    try:
-        open_tasks = len([t for t in (supabase.table(TASK_TABLE).select("status,category").execute().data or []) if t.get("category") == "affiliate" and t.get("status") in ("neu", "in_bearbeitung", "warten")])
-    except Exception:
-        open_tasks = 0
-    try:
-        open_approvals = len([a for a in (supabase.table(APPROVAL_TABLE).select("status,category").execute().data or []) if a.get("category") in ("affiliate", "business") and a.get("status") in ("neu", "ki_geprueft", "zur_pruefung")])
-    except Exception:
-        open_approvals = 0
 
     return {
         "computed_at": today.isoformat(),

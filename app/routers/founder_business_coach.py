@@ -31,6 +31,7 @@ from ..core import founder_business_insight_engine as insight_engine
 from ..core import founder_business_metrics as metrics
 from ..core.admin_rbac import require_admin_permission
 from ..core.audit import record_audit_event
+from ..core.concurrency import run_parallel
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
 from ..services.ai_provider import AIProvider, AIProviderError, OpenAIProvider
@@ -150,9 +151,11 @@ class AskInput(BaseModel):
 @router.get("/business-coach/dashboard")
 async def business_coach_dashboard(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_founder_os")
-    insight_engine.run_insight_detection()
-
-    dashboard = metrics.get_business_dashboard()
+    # get_business_dashboard() doesn't depend on insight detection's
+    # writes, so run it concurrently with detection instead of after it.
+    # The insights select below DOES depend on detection having finished
+    # (it must see freshly-written rows), so that one stays sequential.
+    _, dashboard = run_parallel(insight_engine.run_insight_detection, metrics.get_business_dashboard)
 
     try:
         insights = supabase.table(INSIGHT_TABLE).select("category,status,severity").execute().data or []

@@ -29,6 +29,7 @@ from ..core import automation_registry as registry
 from ..core import automation_score as score_module
 from ..core.admin_rbac import require_admin_permission
 from ..core.audit import record_audit_event
+from ..core.concurrency import run_parallel
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
 from ..services.ai_provider import AIProvider, AIProviderError, OpenAIProvider
@@ -130,16 +131,24 @@ class AlertStatusInput(BaseModel):
 @router.get("/automation/dashboard")
 async def automation_dashboard(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_automation_engine")
+    # Must run before the selects below (it can create/update runs that
+    # those selects should reflect), so it stays sequential; the 2 selects
+    # themselves are independent of each other and run concurrently.
     engine.evaluate_and_run_due_rules()
 
-    try:
-        rules = supabase.table(RULE_TABLE).select("*").execute().data or []
-    except Exception:
-        rules = []
-    try:
-        runs = supabase.table(RUN_TABLE).select("*").order("created_at", desc=True).limit(200).execute().data or []
-    except Exception:
-        runs = []
+    def _rules() -> list[dict]:
+        try:
+            return supabase.table(RULE_TABLE).select("*").execute().data or []
+        except Exception:
+            return []
+
+    def _runs() -> list[dict]:
+        try:
+            return supabase.table(RUN_TABLE).select("*").order("created_at", desc=True).limit(200).execute().data or []
+        except Exception:
+            return []
+
+    rules, runs = run_parallel(_rules, _runs)
 
     today_start = datetime.now(timezone.utc).date().isoformat()
     runs_today = [r for r in runs if str(r.get("created_at", "")).startswith(today_start)]

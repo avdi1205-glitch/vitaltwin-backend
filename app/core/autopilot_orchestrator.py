@@ -22,6 +22,7 @@ from . import autopilot_policies as policies_module
 from . import autopilot_priority as priority_module
 from . import autopilot_state as state_module
 from .audit import record_audit_event
+from .concurrency import run_parallel
 from .supabase import supabase
 
 APPROVAL_TABLE = "vt_founder_approvals"
@@ -41,8 +42,33 @@ def _now_iso() -> str:
 
 
 def get_today_view() -> dict:
-    events_module.collect_events_from_modules()
-    alerts_module.run_alert_detection()
+    def _runs_today() -> tuple[int | None, int | None]:
+        try:
+            runs_today = supabase.table("vt_automation_runs").select("status,created_at").execute().data or []
+            today_start = datetime.now(timezone.utc).date().isoformat()
+            runs_today = [r for r in runs_today if str(r.get("created_at", "")).startswith(today_start)]
+            return (
+                sum(1 for r in runs_today if r.get("status") == "erfolgreich"),
+                sum(1 for r in runs_today if r.get("status") in ("fehlgeschlagen", "dead_letter")),
+            )
+        except Exception:
+            return None, None
+
+    def _waiting_approvals() -> int | None:
+        try:
+            return len([a for a in (supabase.table(APPROVAL_TABLE).select("status").execute().data or []) if a.get("status") in ("neu", "ki_geprueft", "zur_pruefung")])
+        except Exception:
+            return None
+
+    # These 4 are fully independent — run them concurrently. `list_events`
+    # further below must stay sequential, since it needs to see the rows
+    # `collect_events_from_modules` just wrote.
+    _, _, (auto_completed_today, failed_today), waiting_approvals = run_parallel(
+        events_module.collect_events_from_modules,
+        alerts_module.run_alert_detection,
+        _runs_today,
+        _waiting_approvals,
+    )
 
     events = events_module.list_events(status="offen")
     entries = []
@@ -55,20 +81,6 @@ def get_today_view() -> dict:
             "reason": event.get("event_type"), "next_action": event.get("payload_reference"),
             "approval_required": event.get("event_type") == "approval.requested",
         })
-
-    try:
-        runs_today = supabase.table("vt_automation_runs").select("status,created_at").execute().data or []
-        today_start = datetime.now(timezone.utc).date().isoformat()
-        runs_today = [r for r in runs_today if str(r.get("created_at", "")).startswith(today_start)]
-        auto_completed_today = sum(1 for r in runs_today if r.get("status") == "erfolgreich")
-        failed_today = sum(1 for r in runs_today if r.get("status") in ("fehlgeschlagen", "dead_letter"))
-    except Exception:
-        auto_completed_today, failed_today = None, None
-
-    try:
-        waiting_approvals = len([a for a in (supabase.table(APPROVAL_TABLE).select("status").execute().data or []) if a.get("status") in ("neu", "ki_geprueft", "zur_pruefung")])
-    except Exception:
-        waiting_approvals = None
 
     return {
         "computed_at": _now_iso(),
