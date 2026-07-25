@@ -23,6 +23,7 @@ deliberately NOT computed here, since it would not be a real billed amount
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import date, timedelta
 
@@ -52,6 +53,39 @@ def _count(table: str, *, filters: dict[str, object] | None = None) -> int | Non
         return None
 
 
+def _new_users_7d(week_ago: str) -> int | None:
+    try:
+        return supabase.table(USER_TABLE).select("email", count="exact").gte("created_at", week_ago).execute().count
+    except Exception:
+        return None
+
+
+def _active_users_7d(week_ago: str) -> int | None:
+    try:
+        active_rows = supabase.table(DAILY_ENTRY_TABLE).select("email").gte("entry_date", week_ago).execute().data or []
+        return len({row["email"] for row in active_rows if row.get("email")})
+    except Exception:
+        return None
+
+
+def _affiliate_revenue_total() -> float | None:
+    try:
+        conversions = (
+            supabase.table(AFFILIATE_EVENT_TABLE).select("revenue").eq("event_type", "conversion").execute().data or []
+        )
+        return sum(float(row.get("revenue") or 0) for row in conversions)
+    except Exception:
+        return None
+
+
+def _ai_requests_total() -> int | None:
+    try:
+        usage_rows = supabase.table(CHAT_USAGE_TABLE).select("count").execute().data or []
+        return sum(int(row.get("count", 0)) for row in usage_rows)
+    except Exception:
+        return None
+
+
 @router.get("/dashboard")
 async def founder_dashboard(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_founder_os")
@@ -59,44 +93,33 @@ async def founder_dashboard(authorization: str | None = Header(default=None)):
     today = date.today()
     week_ago = (today - timedelta(days=7)).isoformat()
 
-    # --- 1. Nutzer ---------------------------------------------------------
-    total_users = _count(USER_TABLE)
-    new_users_7d = None
-    try:
-        new_users_7d = (
-            supabase.table(USER_TABLE).select("email", count="exact").gte("created_at", week_ago).execute().count
-        )
-    except Exception:
-        new_users_7d = None
-    try:
-        active_rows = supabase.table(DAILY_ENTRY_TABLE).select("email").gte("entry_date", week_ago).execute().data or []
-        active_users_7d: int | None = len({row["email"] for row in active_rows if row.get("email")})
-    except Exception:
-        active_users_7d = None
-    premium_users = _count(USER_TABLE, filters={"premium": True})
-
-    # --- 2. Umsatz -----------------------------------------------------------
-    affiliate_revenue = None
-    try:
-        conversions = (
-            supabase.table(AFFILIATE_EVENT_TABLE).select("revenue").eq("event_type", "conversion").execute().data or []
-        )
-        affiliate_revenue = sum(float(row.get("revenue") or 0) for row in conversions)
-    except Exception:
-        affiliate_revenue = None
-
-    # --- 3. KI ---------------------------------------------------------------
-    ai_requests_total = None
-    try:
-        usage_rows = supabase.table(CHAT_USAGE_TABLE).select("count").execute().data or []
-        ai_requests_total = sum(int(row.get("count", 0)) for row in usage_rows)
-    except Exception:
-        ai_requests_total = None
-
-    # --- 4. Affiliate ----------------------------------------------------------
-    active_products = _count(AFFILIATE_PRODUCT_TABLE, filters={"status": "active"})
-    pending_approval = _count(AFFILIATE_PRODUCT_TABLE, filters={"status": "in_review"})
-    broken_links = _count(AFFILIATE_PRODUCT_TABLE, filters={"link_status": "broken"})
+    # All 9 lookups below are fully independent (different tables/filters) —
+    # run them concurrently in worker threads instead of one-by-one, so the
+    # dashboard's total load time is roughly the slowest single Supabase
+    # round-trip instead of the sum of all of them. This also keeps the
+    # single-process event loop free to serve other requests while these
+    # blocking supabase-py calls are in flight.
+    (
+        total_users,
+        new_users_7d,
+        active_users_7d,
+        premium_users,
+        affiliate_revenue,
+        ai_requests_total,
+        active_products,
+        pending_approval,
+        broken_links,
+    ) = await asyncio.gather(
+        asyncio.to_thread(_count, USER_TABLE),
+        asyncio.to_thread(_new_users_7d, week_ago),
+        asyncio.to_thread(_active_users_7d, week_ago),
+        asyncio.to_thread(_count, USER_TABLE, filters={"premium": True}),
+        asyncio.to_thread(_affiliate_revenue_total),
+        asyncio.to_thread(_ai_requests_total),
+        asyncio.to_thread(_count, AFFILIATE_PRODUCT_TABLE, filters={"status": "active"}),
+        asyncio.to_thread(_count, AFFILIATE_PRODUCT_TABLE, filters={"status": "in_review"}),
+        asyncio.to_thread(_count, AFFILIATE_PRODUCT_TABLE, filters={"link_status": "broken"}),
+    )
 
     # --- 5. System -------------------------------------------------------------
     database_reachable = total_users is not None
