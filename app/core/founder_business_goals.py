@@ -17,6 +17,18 @@ USER_TABLE = "vt_users"
 DAILY_ENTRY_TABLE = "vt_daily_wellness_entries"
 
 
+def _current_automation_percentage() -> float | None:
+    # Local import to avoid a module-load-order dependency between the two
+    # core modules — both are leaf modules, this just keeps import order
+    # flexible for tests that import either file first.
+    from . import automation_score
+
+    try:
+        return automation_score.compute_automation_score().get("overall_percentage")
+    except Exception:
+        return None
+
+
 def _current_active_users_7d() -> int | None:
     try:
         week_ago = (date.today() - timedelta(days=7)).isoformat()
@@ -44,6 +56,13 @@ _METRIC_RESOLVERS = {
     "conversion_rate": _current_conversion_rate,
     "affiliate_umsatz": lambda: sum(metrics.get_affiliate_revenue_by_category(days=30).values()),
     "veroeffentlichte_inhalte": metrics.get_published_content_count,
+    # Additiv für CEO Intelligence (Submodul H): Automatisierungsgrad ist
+    # über core/automation_score.py real berechenbar. "release_ziel" und
+    # "internationales_wachstum" bleiben absichtlich ohne Resolver — es
+    # gibt kein Release-Tracking und keine Länder-/Sprach-Aufschlüsselung
+    # der Nutzer in dieser Codebase (ehrlich "nicht automatisch
+    # berechenbar" statt erfunden).
+    "automatisierungsziel": _current_automation_percentage,
 }
 
 

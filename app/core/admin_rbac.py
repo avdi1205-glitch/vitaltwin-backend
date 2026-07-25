@@ -43,6 +43,7 @@ AdminRole = Literal[
     "analyst",
     "developer",
     "automation_manager",
+    "executive_analyst",
 ]
 
 Permission = Literal[
@@ -74,6 +75,8 @@ Permission = Literal[
     "manage_founder_os",
     "view_automation_engine",
     "manage_automation_engine",
+    "view_ceo_intelligence",
+    "manage_ceo_intelligence",
 ]
 
 _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignore[attr-defined]
@@ -110,12 +113,25 @@ _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignor
 #   with the existing "founder-only" convention from Release F1 onward)
 #   automatically has it; `admin` must be explicitly upgraded to
 #   `automation_manager` or `super_admin` by the founder to gain it.
+# - executive_analyst: Submodule H (CEO Intelligence) ONLY, READ-ONLY —
+#   per that spec's explicit "ausdrücklich freigegebene executive_analyst-
+#   Rolle mit Leserechten". Only `super_admin` may ever *change* strategic
+#   goals, save scenarios, send decisions to the Approval Center, or export
+#   data (`manage_ceo_intelligence` is granted to no other role at all,
+#   including `admin` — same reasoning as Submodule G: this module
+#   surfaces sensitive, aggregated company-wide business data).
 ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
     "super_admin": frozenset(_ALL_PERMISSIONS),  # type: ignore[arg-type]
     "admin": frozenset(
-        _ALL_PERMISSIONS - {"manage_roles", "manage_security", "view_automation_engine", "manage_automation_engine"}
+        _ALL_PERMISSIONS
+        - {
+            "manage_roles", "manage_security",
+            "view_automation_engine", "manage_automation_engine",
+            "view_ceo_intelligence", "manage_ceo_intelligence",
+        }
     ),  # type: ignore[arg-type]
     "automation_manager": frozenset({"view_automation_engine", "manage_automation_engine"}),
+    "executive_analyst": frozenset({"view_ceo_intelligence"}),
     "support": frozenset(
         {
             "view_dashboard",

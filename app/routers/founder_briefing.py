@@ -32,6 +32,7 @@ from fastapi import APIRouter, Header
 
 from ..core.admin_rbac import require_admin_permission
 from ..core import automation_engine
+from ..core import executive_summary
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -273,7 +274,23 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "recommendations": recommendations,
         "priorities": priorities,
         "automation": _automation_summary(),
+        "ceo_summary": _ceo_summary(),
     }
+
+
+def _ceo_summary() -> dict:
+    """Submodul H (CEO Intelligence) integration — a small, additive read
+    of `core/executive_summary.py::get_ceo_daily_briefing_snippet()`.
+    Never raises: if CEO Intelligence tables don't exist yet, the
+    briefing must still work."""
+    try:
+        return executive_summary.get_ceo_daily_briefing_snippet()
+    except Exception:
+        return {
+            "top_metric": None, "biggest_risk": None, "biggest_opportunity": None,
+            "at_risk_goal": None, "open_decision_count": None, "automation_status": None,
+            "note": "CEO Intelligence noch nicht verfügbar.",
+        }
 
 
 def _automation_summary() -> dict:

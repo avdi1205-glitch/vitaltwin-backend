@@ -48,6 +48,10 @@ APPROVAL_TABLE = "vt_founder_approvals"
 ALLOWED_GOAL_CATEGORIES = {
     "monatsumsatz", "premium_abos", "aktive_nutzer", "conversion_rate", "affiliate_umsatz",
     "kuendigungsrate", "ki_kostenlimit", "veroeffentlichte_inhalte", "individuell",
+    # Additiv für CEO Intelligence (Submodul H) ergänzt — dieselbe Tabelle
+    # (vt_founder_business_goals) wird als "Strategic Goals" wiederverwendet,
+    # keine parallele Ziel-Tabelle.
+    "automatisierungsziel", "release_ziel", "internationales_wachstum",
 }
 ALLOWED_GOAL_STATUSES = {"geplant", "aktiv", "gefaehrdet", "erreicht", "pausiert", "archiviert"}
 ALLOWED_INSIGHT_STATUSES = {"erkannt", "geprueft", "als_aufgabe_erstellt", "zur_freigabe_gesendet", "umgesetzt", "verworfen", "archiviert"}
