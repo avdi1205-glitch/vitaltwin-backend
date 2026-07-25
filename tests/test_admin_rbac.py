@@ -50,7 +50,7 @@ class _FakeSupabase:
 
 
 class TestPermissionMatrix:
-    def test_all_seven_roles_are_defined(self):
+    def test_all_eight_roles_are_defined(self):
         assert set(ROLE_PERMISSIONS.keys()) == {
             "super_admin",
             "admin",
@@ -59,10 +59,11 @@ class TestPermissionMatrix:
             "editor",
             "analyst",
             "developer",
+            "automation_manager",
         }
 
-    def test_super_admin_has_all_twenty_six_permissions(self):
-        assert len(ROLE_PERMISSIONS["super_admin"]) == 26
+    def test_super_admin_has_all_twenty_eight_permissions(self):
+        assert len(ROLE_PERMISSIONS["super_admin"]) == 28
 
     def test_only_super_admin_can_manage_roles(self):
         roles_with_manage_roles = {
@@ -76,9 +77,20 @@ class TestPermissionMatrix:
         }
         assert roles_with_manage_security == {"super_admin"}
 
-    def test_admin_has_everything_except_roles_and_security(self):
-        expected = ROLE_PERMISSIONS["super_admin"] - {"manage_roles", "manage_security"}
+    def test_admin_has_everything_except_roles_security_and_automation_engine(self):
+        expected = ROLE_PERMISSIONS["super_admin"] - {
+            "manage_roles", "manage_security", "view_automation_engine", "manage_automation_engine",
+        }
         assert ROLE_PERMISSIONS["admin"] == expected
+
+    def test_automation_manager_has_only_automation_engine_permissions(self):
+        assert ROLE_PERMISSIONS["automation_manager"] == {"view_automation_engine", "manage_automation_engine"}
+
+    def test_only_super_admin_and_automation_manager_can_manage_automation_engine(self):
+        roles_with_manage_automation = {
+            role for role, perms in ROLE_PERMISSIONS.items() if "manage_automation_engine" in perms
+        }
+        assert roles_with_manage_automation == {"super_admin", "automation_manager"}
 
     def test_editor_has_zero_user_data_access(self):
         user_data_permissions = {

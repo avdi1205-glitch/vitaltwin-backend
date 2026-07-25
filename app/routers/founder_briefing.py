@@ -31,6 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Header
 
 from ..core.admin_rbac import require_admin_permission
+from ..core import automation_engine
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -271,4 +272,20 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "warnings": warnings,
         "recommendations": recommendations,
         "priorities": priorities,
+        "automation": _automation_summary(),
     }
+
+
+def _automation_summary() -> dict:
+    """Submodul G (Automation Engine) integration — a small, additive read
+    of `core/automation_engine.py::get_daily_briefing_summary()`. Never
+    raises: if the Automation Engine tables don't exist yet (migration not
+    yet run), the briefing must still work."""
+    try:
+        return automation_engine.get_daily_briefing_summary()
+    except Exception:
+        return {
+            "auto_completed_today": None, "failed_today": None,
+            "awaiting_approval": None, "important_warnings": None,
+            "note": "Automation Engine noch nicht verfügbar.",
+        }

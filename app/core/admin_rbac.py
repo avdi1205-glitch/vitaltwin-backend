@@ -42,6 +42,7 @@ AdminRole = Literal[
     "editor",
     "analyst",
     "developer",
+    "automation_manager",
 ]
 
 Permission = Literal[
@@ -71,6 +72,8 @@ Permission = Literal[
     "manage_affiliate",
     "view_founder_os",
     "manage_founder_os",
+    "view_automation_engine",
+    "manage_automation_engine",
 ]
 
 _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignore[attr-defined]
@@ -96,9 +99,23 @@ _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignor
 #   ability to change anything.
 # - developer: system/security status (read-only) + AI configuration
 #   (models/prompts) — the two areas an engineer actually needs day to day.
+# - automation_manager: Submodule G (Automation Engine) ONLY — an explicit,
+#   narrow role for someone the founder trusts to build/maintain automation
+#   rules, without granting every other admin capability. Deliberately NOT
+#   part of `admin`'s automatic full grant (see the exclusion below) — per
+#   the Submodule G spec ("Normale Admins dürfen nicht automatisch Zugriff
+#   erhalten"), because this module can execute real, non-trivial actions
+#   (pausing affiliate products, creating approvals/tasks). Only
+#   `super_admin` (== the founder in this single-founder app, consistent
+#   with the existing "founder-only" convention from Release F1 onward)
+#   automatically has it; `admin` must be explicitly upgraded to
+#   `automation_manager` or `super_admin` by the founder to gain it.
 ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
     "super_admin": frozenset(_ALL_PERMISSIONS),  # type: ignore[arg-type]
-    "admin": frozenset(_ALL_PERMISSIONS - {"manage_roles", "manage_security"}),  # type: ignore[arg-type]
+    "admin": frozenset(
+        _ALL_PERMISSIONS - {"manage_roles", "manage_security", "view_automation_engine", "manage_automation_engine"}
+    ),  # type: ignore[arg-type]
+    "automation_manager": frozenset({"view_automation_engine", "manage_automation_engine"}),
     "support": frozenset(
         {
             "view_dashboard",
@@ -131,6 +148,7 @@ ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
             "view_system_status",
             "view_integrations",
             "view_affiliate",
+            "view_automation_engine",
         }
     ),
     "developer": frozenset(
