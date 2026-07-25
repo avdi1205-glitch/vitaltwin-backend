@@ -58,6 +58,12 @@ FEATURE_FLAG_TABLE = "vt_feature_flags"
 
 ALLOWED_PRODUCT_STATUSES = {
     "draft", "in_review", "approved", "active", "paused", "expired", "archived",
+    # Erweitert für Founder OS Submodul F (Affiliate Intelligence) — additiv,
+    # bestehende Werte/Bedeutungen unveraendert. "broken_link" wird bewusst
+    # NICHT als Status gefuehrt (das leistet bereits die separate Spalte
+    # `link_status`), "out_of_stock" wird als eigenes `availability`-Feld
+    # gefuehrt (siehe Migration 016), nicht als Produktstatus.
+    "imported", "normalized", "ai_reviewed", "needs_review", "rejected",
 }
 ELIGIBLE_STATUSES = {"approved", "active"}
 ALLOWED_BLACKLIST_TYPES = {"product", "brand", "partner", "category"}
