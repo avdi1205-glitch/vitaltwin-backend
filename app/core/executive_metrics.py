@@ -148,7 +148,20 @@ def get_ceo_overview() -> dict:
         "automation_percentage": _metric(automation.get("overall_percentage"), source="vt_automation_runs", note=automation.get("note")),
         "product_status": _metric(None, source="nicht verbunden", note=NO_RELEASE_NOTE),
         "release_status": _metric(None, source="nicht verbunden", note=NO_RELEASE_NOTE),
+        "documentation_health": _documentation_health_metric(),
     }
+
+
+def _documentation_health_metric() -> dict:
+    """Submodul I (Auto Documentation) integration — additive, read-only.
+    Never raises: if Auto Documentation tables don't exist yet, CEO
+    Intelligence must still work."""
+    try:
+        from . import documentation_score
+        score = documentation_score.compute_documentation_score()
+        return _metric(score.get("overall_percentage"), source="core/documentation_score.py", note=score.get("note"))
+    except Exception:
+        return _metric(None, source="core/documentation_score.py", note="Auto Documentation noch nicht verfügbar.")
 
 
 # ---------------------------------------------------------------------------

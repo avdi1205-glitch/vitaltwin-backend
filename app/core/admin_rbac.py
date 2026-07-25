@@ -44,6 +44,7 @@ AdminRole = Literal[
     "developer",
     "automation_manager",
     "executive_analyst",
+    "documentation_editor",
 ]
 
 Permission = Literal[
@@ -77,6 +78,8 @@ Permission = Literal[
     "manage_automation_engine",
     "view_ceo_intelligence",
     "manage_ceo_intelligence",
+    "view_documentation",
+    "manage_documentation",
 ]
 
 _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignore[attr-defined]
@@ -120,6 +123,15 @@ _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignor
 #   data (`manage_ceo_intelligence` is granted to no other role at all,
 #   including `admin` — same reasoning as Submodule G: this module
 #   surfaces sensitive, aggregated company-wide business data).
+# - documentation_editor: Submodule I (Auto Documentation) ONLY — per that
+#   spec's "eingeschränkter documentation_editor". May prepare drafts,
+#   trigger generation runs, and propose changes, but the founder-only
+#   actions (approving protected documents, publishing public release
+#   notes, changing write-area policy, final archival) are additionally
+#   gated by `admin.role == "super_admin"` inside the router, not by
+#   permission alone — `developer` also gets both Submodule I permissions
+#   (explicit, deliberate grant per spec: "ausdrücklich freigegebener
+#   developer"), since technical staff routinely maintain documentation.
 ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
     "super_admin": frozenset(_ALL_PERMISSIONS),  # type: ignore[arg-type]
     "admin": frozenset(
@@ -128,10 +140,12 @@ ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
             "manage_roles", "manage_security",
             "view_automation_engine", "manage_automation_engine",
             "view_ceo_intelligence", "manage_ceo_intelligence",
+            "view_documentation", "manage_documentation",
         }
     ),  # type: ignore[arg-type]
     "automation_manager": frozenset({"view_automation_engine", "manage_automation_engine"}),
     "executive_analyst": frozenset({"view_ceo_intelligence"}),
+    "documentation_editor": frozenset({"view_documentation", "manage_documentation"}),
     "support": frozenset(
         {
             "view_dashboard",
@@ -176,6 +190,8 @@ ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
             "manage_ai_settings",
             "view_content",
             "view_integrations",
+            "view_documentation",
+            "manage_documentation",
         }
     ),
 }

@@ -33,6 +33,7 @@ from fastapi import APIRouter, Header
 from ..core.admin_rbac import require_admin_permission
 from ..core import automation_engine
 from ..core import executive_summary
+from ..core import documentation_score
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -275,7 +276,23 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "priorities": priorities,
         "automation": _automation_summary(),
         "ceo_summary": _ceo_summary(),
+        "documentation": _documentation_summary(),
     }
+
+
+def _documentation_summary() -> dict:
+    """Submodul I (Auto Documentation) integration — a small, additive
+    read of core/documentation_score.py. Never raises: if the Auto
+    Documentation tables don't exist yet, the briefing must still work."""
+    try:
+        score = documentation_score.compute_documentation_score()
+        return {
+            "coverage_percentage": score.get("overall_percentage"),
+            "stale_documents": score.get("stale_documents"),
+            "open_change_proposals": score.get("open_change_proposals"),
+        }
+    except Exception:
+        return {"coverage_percentage": None, "stale_documents": None, "open_change_proposals": None, "note": "Auto Documentation noch nicht verfügbar."}
 
 
 def _ceo_summary() -> dict:

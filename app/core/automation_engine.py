@@ -449,6 +449,18 @@ def _execute_action(action: dict, rule: dict) -> dict:
                 "previous_state": {"table": RULE_TABLE, "id": target_rule_id, "field": "status", "value": previous.get("status")},
             }
 
+        if action_type == "dokumentation_pruefen":
+            # Local import to avoid a hard import-time dependency between
+            # Submodule G and Submodule I core modules (keeps each
+            # importable in isolation, e.g. for narrowly-scoped unit tests).
+            from . import documentation_generation
+            result = documentation_generation.run_generation(run_type="automation_engine", triggered_by=None)
+            return {
+                "status": "erfolgreich" if result.get("status") == "erfolgreich" else "fehlgeschlagen",
+                "detail": {k: result.get(k) for k in ("items_scanned", "items_updated", "items_flagged_stale", "error")},
+                "previous_state": None,
+            }
+
         if action_type == "workflow_stoppen":
             target_run_id = params.get("target_run_id")
             if target_run_id:

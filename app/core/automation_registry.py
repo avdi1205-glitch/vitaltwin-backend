@@ -23,10 +23,9 @@ the first place — see `CRITICAL_ACTIONS_NOT_IMPLEMENTED_NOTE` below.
 **Only actions backed by real, already-existing functionality are
 implemented** (same "keine Fake-Daten" principle as every other
 Founder-OS detector/engine in this codebase). Several actions named in the
-spec (cache invalidation, changelog preparation, documentation
-regeneration, support-ticket categorization, background-job restart) have
-**no real infrastructure behind them in this codebase** — there is no
-cache layer, no changelog system, no doc-generation pipeline, no ticket
+spec (cache invalidation, changelog preparation, support-ticket
+categorization, background-job restart) have **no real infrastructure
+behind them in this codebase** — there is no cache layer, no ticket
 category field, no background-job/queue runtime to restart. Implementing
 them would mean either doing nothing while claiming success, or inventing
 fake state — both violate the mandate. They are therefore intentionally
@@ -77,7 +76,7 @@ AUTOMATION_CATEGORIES: frozenset[str] = frozenset(AutomationCategory.__args__)  
 # real detection rule).
 CATEGORIES_WITH_REAL_ACTIONS: frozenset[str] = frozenset(
     {"affiliate", "business", "analytics", "reports", "system_monitoring",
-     "api_monitoring", "integrationen", "founder_tasks", "founder_briefing"}
+     "api_monitoring", "integrationen", "founder_tasks", "founder_briefing", "dokumentation"}
 )
 
 
@@ -170,6 +169,13 @@ ACTION_REGISTRY: dict[str, ActionDefinition] = {
         required_inputs=("target_run_id",), output_schema=("run_id", "new_status"),
         note="Meta-Aktion: markiert einen laufenden/wartenden Run als 'abgebrochen'.",
     ),
+    "dokumentation_pruefen": ActionDefinition(
+        action_type="dokumentation_pruefen", label="Dokumentationslauf ausführen (Stale/Missing Detection)", risk_level="low",
+        required_role=None, requires_approval_by_default=False, idempotent=True, reversible=False,
+        timeout_seconds=20, retry_allowed=True, allowed_environments=ALL_ENVIRONMENTS,
+        required_inputs=(), output_schema=("items_scanned", "items_updated", "items_flagged_stale"),
+        note="Reuses core/documentation_generation.py::run_generation() (Submodul I) — schreibt niemals geschützte Dokumente automatisch.",
+    ),
 }
 
 # Named exactly so a founder-facing UI/README can explain the omission
@@ -177,12 +183,13 @@ ACTION_REGISTRY: dict[str, ActionDefinition] = {
 NOT_IMPLEMENTED_ACTIONS_NOTE = (
     "Folgende im Auftrag genannte Aktionen sind bewusst NICHT implementiert, "
     "weil keine reale Infrastruktur dahinter existiert (kein Cache-Layer, kein "
-    "Changelog-System, keine Doku-Generierung, kein Support-Ticket-Kategoriefeld, "
-    "kein Hintergrundjob/Queue-Runtime): Cache leeren, Dokumentation aktualisieren, "
-    "Changelog vorbereiten, Support-Ticket kategorisieren, Background Job neu starten, "
+    "Support-Ticket-Kategoriefeld, kein Hintergrundjob/Queue-Runtime): Cache leeren, "
+    "Support-Ticket kategorisieren, Background Job neu starten, "
     "Produktdaten neu synchronisieren (über den bestehenden manuellen Import hinaus), "
     "Integration als fehlerhaft markieren (es gibt keinen Integrationsstatus, der "
-    "persistiert und nicht schon in core/integrations.py live berechnet wird)."
+    "persistiert und nicht schon in core/integrations.py live berechnet wird). "
+    "Dokumentationsaktualisierung ('dokumentation_pruefen') ist seit Submodul I real "
+    "implementiert, schreibt aber niemals geschützte Dokumente automatisch."
 )
 
 CRITICAL_ACTIONS_NOT_IMPLEMENTED_NOTE = (
