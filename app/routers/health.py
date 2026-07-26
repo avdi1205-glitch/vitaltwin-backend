@@ -27,11 +27,27 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..core.auth import require_email
 from ..core.supabase import supabase
+from .users import is_premium_by_email
 
 router = APIRouter()
 
 CGM_TABLE = "vt_cgm_readings"
 NUTRITION_TABLE = "vt_nutrition_entries"
+
+PREMIUM_REQUIRED_DETAIL = (
+    "Blutzucker-Tracking (CGM-Import) und das Ernährungstagebuch sind ein Premium-Feature. "
+    "Aktiviere Premium unter /preise, um sie zu nutzen."
+)
+
+
+def _require_premium(email: str) -> None:
+    """Hard paywall for this whole router — CGM import/nutrition logging is
+    a Premium-exclusive feature (product decision), not a soft limit like
+    `routers/chat.py`'s free/premium AI tiering. Uses the same
+    `is_premium_by_email` helper already used there and in
+    `routers/payments.py` — no parallel premium-check logic."""
+    if not is_premium_by_email(email):
+        raise HTTPException(status_code=403, detail=PREMIUM_REQUIRED_DETAIL)
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB — a multi-week CGM export is a few hundred KB at most.
 MAX_ROWS_PER_UPLOAD = 10_000
@@ -99,6 +115,7 @@ class NutritionEntryInput(BaseModel):
 @router.post("/cgm/upload-csv")
 async def upload_cgm_csv(file: UploadFile = File(...), authorization: str | None = Header(default=None)):
     email = require_email(authorization)
+    _require_premium(email)
 
     raw_bytes = await file.read()
     if len(raw_bytes) > MAX_UPLOAD_BYTES:
@@ -159,6 +176,7 @@ async def upload_cgm_csv(file: UploadFile = File(...), authorization: str | None
 @router.get("/cgm")
 async def list_cgm_readings(days: int = 7, authorization: str | None = Header(default=None)):
     email = require_email(authorization)
+    _require_premium(email)
     bounded_days = max(1, min(days, 90))
     since = (datetime.now(timezone.utc) - timedelta(days=bounded_days)).isoformat()
 
@@ -185,6 +203,7 @@ async def list_cgm_readings(days: int = 7, authorization: str | None = Header(de
 @router.post("/nutrition")
 async def create_nutrition_entry(data: NutritionEntryInput, authorization: str | None = Header(default=None)):
     email = require_email(authorization)
+    _require_premium(email)
     logged_at = data.timestamp or datetime.now(timezone.utc).isoformat()
 
     payload = {
@@ -207,6 +226,7 @@ async def create_nutrition_entry(data: NutritionEntryInput, authorization: str |
 @router.get("/nutrition")
 async def list_nutrition_entries(days: int = 7, authorization: str | None = Header(default=None)):
     email = require_email(authorization)
+    _require_premium(email)
     bounded_days = max(1, min(days, 90))
     since = (datetime.now(timezone.utc) - timedelta(days=bounded_days)).isoformat()
 

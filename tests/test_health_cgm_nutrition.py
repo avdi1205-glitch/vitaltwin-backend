@@ -110,6 +110,10 @@ def auth_spy(monkeypatch):
         return "user@example.com"
 
     monkeypatch.setattr(health_module, "require_email", _fake)
+    # Every other test in this file exercises the actual CGM/nutrition
+    # behavior, which requires Premium (see TestPremiumGate for the
+    # free-user 403 case) — default to a premium user here.
+    monkeypatch.setattr(health_module, "is_premium_by_email", lambda email: True)
     return calls
 
 
@@ -219,3 +223,41 @@ class TestNutritionEntry:
         result = await health_module.list_nutrition_entries(days=7, authorization="Bearer x")
         assert len(result) == 1
         assert result[0]["meal_name"] == "Mine"
+
+
+class TestPremiumGate:
+    """CGM import & nutrition logging are a Premium-exclusive feature
+    (product decision) — every endpoint must reject a logged-in but
+    non-premium user with 403, never silently degrade or allow it."""
+
+    @pytest.fixture(autouse=True)
+    def _free_user(self, monkeypatch):
+        monkeypatch.setattr(health_module, "require_email", lambda authorization: "free-user@example.com")
+        monkeypatch.setattr(health_module, "is_premium_by_email", lambda email: False)
+
+    @pytest.mark.anyio
+    async def test_upload_cgm_csv_requires_premium(self, fake_supabase):
+        with pytest.raises(HTTPException) as exc_info:
+            await health_module.upload_cgm_csv(file=_upload(LIBREVIEW_CSV), authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+        assert fake_supabase.tables.get(health_module.CGM_TABLE, []) == []
+
+    @pytest.mark.anyio
+    async def test_list_cgm_requires_premium(self, fake_supabase):
+        with pytest.raises(HTTPException) as exc_info:
+            await health_module.list_cgm_readings(days=7, authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_create_nutrition_entry_requires_premium(self, fake_supabase):
+        data = health_module.NutritionEntryInput(meal_name="Haferflocken", carbs=40, protein=10, fat=5, calories=250)
+        with pytest.raises(HTTPException) as exc_info:
+            await health_module.create_nutrition_entry(data=data, authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+        assert fake_supabase.tables.get(health_module.NUTRITION_TABLE, []) == []
+
+    @pytest.mark.anyio
+    async def test_list_nutrition_requires_premium(self, fake_supabase):
+        with pytest.raises(HTTPException) as exc_info:
+            await health_module.list_nutrition_entries(days=7, authorization="Bearer x")
+        assert exc_info.value.status_code == 403
