@@ -437,6 +437,28 @@ class TestHonestyNotes:
         assert "note" in result and len(result["note"]) > 0
 
     @pytest.mark.anyio
+    async def test_nutrition_overview_reports_real_stats_once_data_exists(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_cgm_readings"] = {
+            "data": [
+                {"email": "a@example.com", "glucose_value": 110, "reading_at": "2026-07-20T08:00:00+00:00"},
+                {"email": "a@example.com", "glucose_value": 115, "reading_at": "2026-07-20T08:15:00+00:00"},
+                {"email": "b@example.com", "glucose_value": 120, "reading_at": "2026-07-20T09:00:00+00:00"},
+            ]
+        }
+        fake_supabase.store["vt_nutrition_entries"] = {
+            "data": [
+                {"email": "a@example.com", "meal_name": "Haferflocken", "carbs": 40, "logged_at": "2026-07-20T08:00:00+00:00"},
+            ]
+        }
+        result = await admin_module.nutrition_overview(authorization="Bearer x")
+        assert result["available"] is True
+        assert result["cgm"]["total_readings"] == 3
+        assert result["cgm"]["unique_users"] == 2
+        assert result["nutrition"]["total_entries"] == 1
+        assert result["nutrition"]["unique_users"] == 1
+        assert result["nutrition"]["last_entries"][0]["meal_name"] == "Haferflocken"
+
+    @pytest.mark.anyio
     async def test_dashboard_reports_revenue_and_error_tracking_notes(self, fake_supabase, permission_spy):
         result = await admin_module.admin_dashboard(authorization="Bearer x")
         assert "revenue_note" in result

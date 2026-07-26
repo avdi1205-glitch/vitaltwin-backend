@@ -35,6 +35,7 @@ from pydantic import BaseModel, field_validator
 
 from ..core.admin_rbac import ROLE_PERMISSIONS, require_admin, require_admin_permission
 from ..core.audit import record_audit_event
+from ..core.concurrency import run_parallel
 from ..core.integrations import get_full_integration_report
 from ..core.plans import get_configured_price_id
 from ..core.supabase import supabase
@@ -828,18 +829,80 @@ async def business_overview(authorization: str | None = Header(default=None)):
 
 @router.get("/nutrition/overview")
 async def nutrition_overview(authorization: str | None = Header(default=None)):
+    """Real pipeline monitoring, now that `routers/health.py` (CGM CSV
+    import + manual nutrition logging) actually writes to
+    `vt_cgm_readings`/`vt_nutrition_entries`. Still honestly reports
+    `available: False` + a note when both tables are empty — never a
+    fabricated number — matching every other Founder-OS/Admin module."""
     require_admin_permission(authorization, "view_nutrition_admin")
+
+    def _cgm_rows() -> list[dict]:
+        try:
+            return (
+                supabase.table("vt_cgm_readings")
+                .select("email,glucose_value,reading_at")
+                .order("reading_at", desc=True)
+                .limit(500)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _nutrition_rows() -> list[dict]:
+        try:
+            return (
+                supabase.table("vt_nutrition_entries")
+                .select("email,meal_name,carbs,logged_at")
+                .order("logged_at", desc=True)
+                .limit(500)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    cgm_rows, nutrition_rows = run_parallel(_cgm_rows, _nutrition_rows)
+
+    if not cgm_rows and not nutrition_rows:
+        return {
+            "status": "empty",
+            "available": False,
+            "note": (
+                "VitalTwin hat noch keine CGM- oder Nutrition-Einträge in der Datenbank. Sobald Nutzer echte "
+                "CSV-Dateien hochladen (/api/health/cgm/upload-csv) oder Mahlzeiten eintragen "
+                "(/api/health/nutrition), erscheinen hier echte Kennzahlen."
+            ),
+            "import_errors": [],
+            "connector_status": [],
+            "import_stats": {},
+        }
+
     return {
-        "available": False,
-        "note": (
-            "VitalTwin hat aktuell keine Nutrition-/CGM-Datenpipeline (kein Connector, kein Import, keine "
-            "systemweite Datenqualitätsprüfung). Dieser Bereich ist strukturell vorbereitet (die Berechtigung "
-            "`view_nutrition_admin` existiert bereits), zeigt aber ehrlich an, dass es noch nichts zu "
-            "überwachen gibt, statt erfundene Kennzahlen darzustellen."
-        ),
+        "status": "active",
+        "available": True,
+        "note": None,
         "import_errors": [],
         "connector_status": [],
         "import_stats": {},
+        "cgm": {
+            "total_readings": len(cgm_rows),
+            "unique_users": len({row["email"] for row in cgm_rows if row.get("email")}),
+            "last_imports": [
+                {"timestamp": row.get("reading_at"), "glucose_value": row.get("glucose_value")}
+                for row in cgm_rows[:10]
+            ],
+        },
+        "nutrition": {
+            "total_entries": len(nutrition_rows),
+            "unique_users": len({row["email"] for row in nutrition_rows if row.get("email")}),
+            "last_entries": [
+                {"meal_name": row.get("meal_name"), "carbs": row.get("carbs")}
+                for row in nutrition_rows[:10]
+            ],
+        },
     }
 
 
