@@ -3,7 +3,9 @@ import stripe
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
+from datetime import datetime, timezone
 
+from ..core import stripe_billing
 from ..core.plans import get_all_configured_price_ids, get_configured_price_id
 from .users import get_email_by_token, set_premium_by_email
 
@@ -90,6 +92,113 @@ async def create_checkout(data: CreateCheckout):
         raise HTTPException(400, str(e))
 
 
+def _unix_to_iso(timestamp: int | None) -> str | None:
+    if not timestamp:
+        return None
+    try:
+        return datetime.fromtimestamp(int(timestamp), tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _resolve_customer_email(customer_id: str | None) -> str | None:
+    """Real lookup via the Stripe API — never guessed. Subscription/charge
+    objects don't carry the customer's email directly, only their Stripe
+    customer id, so this is one extra (cheap, infrequent) live Stripe call
+    per webhook that needs it. Never raises — a failed lookup just means
+    the resulting row is stored with `email=None` instead of blocking the
+    whole webhook."""
+    if not customer_id:
+        return None
+    try:
+        customer = stripe.Customer.retrieve(customer_id)
+        email = customer.get("email") if isinstance(customer, dict) else getattr(customer, "email", None)
+        return email.strip().lower() if isinstance(email, str) and email.strip() else None
+    except Exception:
+        return None
+
+
+def _handle_checkout_completed(session: dict) -> None:
+    metadata = session.get("metadata") or {}
+    email = metadata.get("user_email") or session.get("customer_email") or session.get("client_reference_id")
+    if isinstance(email, str) and email.strip():
+        set_premium_by_email(email.strip().lower(), True)
+
+
+def _handle_subscription_upsert(subscription: dict) -> None:
+    email = _resolve_customer_email(subscription.get("customer"))
+    items = (subscription.get("items") or {}).get("data") or []
+    price_id = None
+    if items and isinstance(items[0], dict):
+        price = items[0].get("price") or {}
+        price_id = price.get("id") if isinstance(price, dict) else None
+
+    stripe_billing.upsert_subscription(
+        email=email or "",
+        stripe_subscription_id=subscription.get("id", ""),
+        status=subscription.get("status", "unknown"),
+        stripe_customer_id=subscription.get("customer"),
+        plan_price_id=price_id,
+        current_period_end=_unix_to_iso(subscription.get("current_period_end")),
+        cancel_at_period_end=bool(subscription.get("cancel_at_period_end")),
+    )
+
+
+def _handle_subscription_deleted(subscription: dict) -> None:
+    email = _resolve_customer_email(subscription.get("customer"))
+    stripe_billing.upsert_subscription(
+        email=email or "",
+        stripe_subscription_id=subscription.get("id", ""),
+        status="canceled",
+        stripe_customer_id=subscription.get("customer"),
+        canceled_at=datetime.now(timezone.utc).isoformat(),
+    )
+    # The subscription has genuinely ended (Stripe only fires this event
+    # after any cancel_at_period_end grace period, or on immediate
+    # cancellation) — downgrading here keeps `premium` truthful instead of
+    # leaving it stuck `True` forever after a real cancellation.
+    if email:
+        set_premium_by_email(email, False)
+
+
+def _handle_invoice_paid(invoice: dict) -> None:
+    email = invoice.get("customer_email") or _resolve_customer_email(invoice.get("customer"))
+    paid_at = _unix_to_iso((invoice.get("status_transitions") or {}).get("paid_at"))
+    stripe_billing.record_payment(
+        stripe_invoice_id=invoice.get("id", ""),
+        amount_paid=int(invoice.get("amount_paid") or 0),
+        currency=invoice.get("currency", "eur"),
+        email=email,
+        stripe_customer_id=invoice.get("customer"),
+        paid_at=paid_at,
+    )
+
+
+def _handle_charge_refunded(charge: dict) -> None:
+    email = (charge.get("billing_details") or {}).get("email") or _resolve_customer_email(charge.get("customer"))
+    refunds = (charge.get("refunds") or {}).get("data") or []
+    for refund in refunds:
+        stripe_billing.record_refund(
+            stripe_refund_id=refund.get("id", ""),
+            amount=int(refund.get("amount") or 0),
+            currency=refund.get("currency", "eur"),
+            email=email,
+            stripe_customer_id=charge.get("customer"),
+            stripe_charge_id=charge.get("id"),
+            reason=refund.get("reason"),
+        )
+
+
+_EVENT_HANDLERS = {
+    "checkout.session.completed": _handle_checkout_completed,
+    "customer.subscription.created": _handle_subscription_upsert,
+    "customer.subscription.updated": _handle_subscription_upsert,
+    "customer.subscription.deleted": _handle_subscription_deleted,
+    "invoice.paid": _handle_invoice_paid,
+    "charge.refunded": _handle_charge_refunded,
+}
+
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request, stripe_signature: str | None = Header(default=None, alias="Stripe-Signature")):
     webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
@@ -102,11 +211,8 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
     except Exception:
         raise HTTPException(status_code=400, detail="Ungültige Stripe Signatur")
 
-    if event.get("type") == "checkout.session.completed":
-        session = event.get("data", {}).get("object", {})
-        metadata = session.get("metadata") or {}
-        email = metadata.get("user_email") or session.get("customer_email") or session.get("client_reference_id")
-        if isinstance(email, str) and email.strip():
-            set_premium_by_email(email.strip().lower(), True)
+    handler = _EVENT_HANDLERS.get(event.get("type"))
+    if handler is not None:
+        handler(event.get("data", {}).get("object", {}))
 
     return {"received": True}

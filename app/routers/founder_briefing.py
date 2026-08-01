@@ -38,6 +38,7 @@ from ..core.ai_usage_logger import get_ai_usage_summary
 from ..core.concurrency import run_parallel
 from ..core.founder_backup_status import get_latest_backup_status
 from ..core.founder_releases import get_latest_release
+from ..core import stripe_billing
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -192,13 +193,18 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
     else:
         new_users_yesterday_only = None
 
+    revenue_today = stripe_billing.get_revenue_for_window(today_start)
+    revenue_yesterday = stripe_billing.get_revenue_for_window(yesterday_start, today_start)
+    revenue_month_summary = stripe_billing.get_revenue_summary()
+    cancellations_today = stripe_billing.get_cancellations_since(today_start)
+
     business = {
-        "revenue_today": None,
-        "revenue_today_note": NO_STRIPE_REPORTING_NOTE,
-        "revenue_yesterday": None,
-        "revenue_yesterday_note": NO_STRIPE_REPORTING_NOTE,
-        "revenue_month": None,
-        "revenue_month_note": NO_STRIPE_REPORTING_NOTE,
+        "revenue_today": revenue_today,
+        "revenue_today_note": None if revenue_today is not None else NO_STRIPE_REPORTING_NOTE,
+        "revenue_yesterday": revenue_yesterday,
+        "revenue_yesterday_note": None if revenue_yesterday is not None else NO_STRIPE_REPORTING_NOTE,
+        "revenue_month": revenue_month_summary["revenue_month"],
+        "revenue_month_note": revenue_month_summary["note"],
         "premium_sales": None,
         "premium_sales_note": NO_PREMIUM_TIMESTAMP_NOTE,
         "affiliate_revenue_today": affiliate_revenue_today,
@@ -209,8 +215,8 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "active_today": active_users_today,
         "new_premium": None,
         "new_premium_note": NO_PREMIUM_TIMESTAMP_NOTE,
-        "cancellations": None,
-        "cancellations_note": NO_CANCELLATION_NOTE,
+        "cancellations": cancellations_today,
+        "cancellations_note": None if cancellations_today is not None else NO_CANCELLATION_NOTE,
     }
 
     ai = {

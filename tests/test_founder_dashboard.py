@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.routers import founder as founder_module
-from app.core import ai_usage_logger, founder_releases
+from app.core import ai_usage_logger, founder_releases, stripe_billing
 
 
 @pytest.fixture
@@ -119,6 +119,7 @@ def fake_internal_logging(monkeypatch):
 
     monkeypatch.setattr(ai_usage_logger, "supabase", _EmptySupabase())
     monkeypatch.setattr(founder_releases, "supabase", _EmptySupabase())
+    monkeypatch.setattr(stripe_billing, "supabase", _EmptySupabase())
 
 
 class TestFounderDashboard:
@@ -140,11 +141,15 @@ class TestFounderDashboard:
         assert result["revenue"]["affiliate"] == pytest.approx(24.99)
 
     @pytest.mark.anyio
-    async def test_stripe_and_premium_revenue_are_honestly_none(self, founder_supabase, founder_permission_spy):
+    async def test_stripe_revenue_is_real_zero_but_premium_breakdown_is_honestly_none(self, founder_supabase, founder_permission_spy):
         result = await founder_module.founder_dashboard(authorization="Bearer x")
-        assert result["revenue"]["stripe"] is None
+        # Real, zero-row aggregation from vt_stripe_payments — genuinely
+        # zero (not a fabricated placeholder) since no payment happened yet
+        # in this test's fake table.
+        assert result["revenue"]["stripe"] == 0.0
+        # No per-plan revenue breakdown implemented — stays honestly None.
         assert result["revenue"]["premium"] is None
-        assert "note" in result["revenue"]["stripe_note"] or result["revenue"]["stripe_note"]
+        assert result["revenue"]["stripe_note"]
         assert result["revenue"]["premium_note"]
 
     @pytest.mark.anyio

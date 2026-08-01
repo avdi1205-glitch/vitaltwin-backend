@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.routers import founder_briefing as briefing_module
-from app.core import ai_usage_logger, founder_backup_status, founder_releases
+from app.core import ai_usage_logger, founder_backup_status, founder_releases, stripe_billing
 
 
 @pytest.fixture
@@ -77,6 +77,12 @@ def fake_internal_logging(monkeypatch):
         def gte(self, *a, **k):
             return self
 
+        def lt(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
         def order(self, *a, **k):
             return self
 
@@ -93,6 +99,7 @@ def fake_internal_logging(monkeypatch):
     monkeypatch.setattr(ai_usage_logger, "supabase", _EmptySupabase())
     monkeypatch.setattr(founder_releases, "supabase", _EmptySupabase())
     monkeypatch.setattr(founder_backup_status, "supabase", _EmptySupabase())
+    monkeypatch.setattr(stripe_billing, "supabase", _EmptySupabase())
 
 
 class TestFounderDailyBriefing:
@@ -103,14 +110,18 @@ class TestFounderDailyBriefing:
         assert briefing_permission_spy[-1] == ("Bearer x", "view_founder_os")
 
     @pytest.mark.anyio
-    async def test_no_stripe_revenue_is_honestly_none_with_note(self, briefing_permission_spy, monkeypatch):
+    async def test_stripe_revenue_is_real_zero_but_premium_sales_stays_honestly_none(self, briefing_permission_spy, monkeypatch):
         _empty_supabase(monkeypatch)
         result = await briefing_module.founder_daily_briefing(authorization="Bearer x")
-        assert result["business"]["revenue_today"] is None
-        assert "Stripe" in result["business"]["revenue_today_note"]
+        # Real, zero-row aggregation from vt_stripe_payments — genuinely
+        # zero (not a fabricated placeholder) since no payment happened yet
+        # in this test's fake table.
+        assert result["business"]["revenue_today"] == 0.0
         assert result["business"]["premium_sales"] is None
         assert result["users"]["new_premium"] is None
-        assert result["users"]["cancellations"] is None
+        # Cancellations are a real, zero-row aggregation from
+        # vt_stripe_subscriptions — genuinely zero, not a placeholder.
+        assert result["users"]["cancellations"] == 0
 
     @pytest.mark.anyio
     async def test_ai_cost_is_honestly_none_but_errors_are_a_real_zero(self, briefing_permission_spy, monkeypatch):

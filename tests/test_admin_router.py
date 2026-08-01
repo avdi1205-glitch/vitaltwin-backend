@@ -13,7 +13,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.admin_rbac import AdminPrincipal
-from app.core import ai_usage_logger, error_events, founder_backup_status, founder_releases
+from app.core import ai_usage_logger, error_events, founder_backup_status, founder_releases, stripe_billing
 from app.routers import admin as admin_module
 from app.routers.admin import BackupInput, ContentInput, PremiumInput, ReleaseInput, RoleInput, SuspendInput
 
@@ -128,11 +128,13 @@ def fake_internal_logging_supabase(monkeypatch):
     backup_fake = _FakeSupabase()
     error_fake = _FakeSupabase()
     ai_usage_fake = _FakeSupabase()
+    stripe_fake = _FakeSupabase()
     monkeypatch.setattr(founder_releases, "supabase", release_fake)
     monkeypatch.setattr(founder_backup_status, "supabase", backup_fake)
     monkeypatch.setattr(error_events, "supabase", error_fake)
     monkeypatch.setattr(ai_usage_logger, "supabase", ai_usage_fake)
-    return SimpleNamespace(release=release_fake, backup=backup_fake, error=error_fake, ai_usage=ai_usage_fake)
+    monkeypatch.setattr(stripe_billing, "supabase", stripe_fake)
+    return SimpleNamespace(release=release_fake, backup=backup_fake, error=error_fake, ai_usage=ai_usage_fake, stripe=stripe_fake)
 
 
 @pytest.fixture
@@ -243,12 +245,12 @@ class TestPermissionRequirements:
         assert permission_spy[-1] == ("Bearer x", "manage_content")
 
     @pytest.mark.anyio
-    async def test_ai_usage_requires_view_ai_usage(self, fake_supabase, permission_spy):
+    async def test_ai_usage_requires_view_ai_usage(self, fake_supabase, fake_internal_logging_supabase, permission_spy):
         await admin_module.ai_usage(authorization="Bearer x")
         assert permission_spy[-1] == ("Bearer x", "view_ai_usage")
 
     @pytest.mark.anyio
-    async def test_business_overview_requires_view_business(self, fake_supabase, permission_spy):
+    async def test_business_overview_requires_view_business(self, fake_supabase, fake_internal_logging_supabase, permission_spy):
         await admin_module.business_overview(authorization="Bearer x")
         assert permission_spy[-1] == ("Bearer x", "view_business")
 
@@ -486,13 +488,17 @@ class TestHonestyNotes:
         assert "error_tracking_note" in result
 
     @pytest.mark.anyio
-    async def test_ai_usage_reports_token_and_prompt_versioning_notes(self, fake_supabase, permission_spy):
+    async def test_ai_usage_reports_token_and_prompt_versioning_notes(
+        self, fake_supabase, fake_internal_logging_supabase, permission_spy
+    ):
         result = await admin_module.ai_usage(authorization="Bearer x")
         assert "token_usage_note" in result
         assert "prompt_versions_note" in result
 
     @pytest.mark.anyio
-    async def test_business_overview_reports_revenue_affiliate_and_coupon_notes(self, fake_supabase, permission_spy):
+    async def test_business_overview_reports_revenue_affiliate_and_coupon_notes(
+        self, fake_supabase, fake_internal_logging_supabase, permission_spy
+    ):
         result = await admin_module.business_overview(authorization="Bearer x")
         assert "revenue_note" in result
         assert "affiliate_note" in result

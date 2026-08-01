@@ -42,6 +42,7 @@ from ..core.founder_backup_status import get_latest_backup_status, list_backups,
 from ..core.founder_releases import get_latest_release, list_releases, record_release
 from ..core.integrations import get_full_integration_report
 from ..core.plans import get_configured_price_id
+from ..core import stripe_billing
 from ..core.supabase import supabase
 from ..services.privacy_export import resolve_current_consents
 from .users import set_premium_by_email
@@ -927,12 +928,24 @@ async def business_overview(authorization: str | None = Header(default=None)):
         "family_yearly": get_configured_price_id("family", "yearly") is not None,
     }
 
+    revenue = stripe_billing.get_revenue_summary()
+    subscriptions = stripe_billing.get_subscription_summary()
+    refunds = stripe_billing.get_refund_summary(days=30)
+
     return {
         "premium_users": premium_users,
         "stripe_configured": bool(os.getenv("STRIPE_SECRET_KEY", "").strip()),
         "configured_plan_prices": configured_prices,
         "pro_family_note": "PRO/FAMILY sind in der Datenbank aktuell nicht von PREMIUM unterscheidbar (ein boolesches Flag).",
-        "revenue_note": "Kein Umsatz-Reporting implementiert (erfordert Stripe-Reporting-API-Anbindung).",
+        "revenue_today": revenue["revenue_today"],
+        "revenue_month": revenue["revenue_month"],
+        "revenue_note": revenue["note"],
+        "active_subscriptions": subscriptions["active"],
+        "canceled_subscriptions": subscriptions["canceled"],
+        "subscriptions_note": subscriptions["note"],
+        "refunds_count_30d": refunds["count"],
+        "refunds_total_30d": refunds["total"],
+        "refunds_note": refunds["note"],
         "affiliate_note": "Kein Affiliate-/Provisions-System implementiert.",
         "coupons_note": "Keine Gutschein-Verwaltung implementiert.",
     }

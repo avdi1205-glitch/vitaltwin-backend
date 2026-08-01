@@ -32,6 +32,7 @@ from fastapi import APIRouter, Header
 from ..core.admin_rbac import require_admin_permission
 from ..core.ai_usage_logger import get_ai_usage_summary
 from ..core.founder_releases import get_latest_release
+from ..core import stripe_billing
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -127,6 +128,8 @@ async def founder_dashboard(authorization: str | None = Header(default=None)):
     database_reachable = total_users is not None
     ai_usage_today = get_ai_usage_summary(days=1)
     latest_release = get_latest_release()
+    revenue_summary = stripe_billing.get_revenue_summary()
+    subscription_summary = stripe_billing.get_subscription_summary()
 
     return {
         "users": {
@@ -136,14 +139,15 @@ async def founder_dashboard(authorization: str | None = Header(default=None)):
             "premium": premium_users,
         },
         "revenue": {
-            "stripe": None,
-            "stripe_note": "Kein Stripe-Reporting implementiert (erfordert Stripe-Reporting-API-Anbindung).",
+            "stripe": revenue_summary["revenue_month"],
+            "stripe_note": revenue_summary["note"],
             "affiliate": affiliate_revenue,
             "premium": None,
             "premium_note": (
-                "Kein Umsatz-Reporting implementiert. Nutzerzahl mal Listenpreis wäre eine Schätzung, keine "
-                "echte Zahl (Rabatte/Rückerstattungen/anteilige Monate nicht berücksichtigt) — daher hier "
-                "bewusst nicht berechnet."
+                "Kein umsatzseitiges Aufschlüsseln nach Tarif implementiert (vt_stripe_payments verknüpft "
+                "Zahlungen nicht mit einem Tarif) — Nutzerzahl mal Listenpreis wäre eine Schätzung, keine "
+                "echte Zahl, daher hier bewusst nicht berechnet. Aktive Abonnements insgesamt: "
+                f"{subscription_summary['active'] if subscription_summary['active'] is not None else '—'}."
             ),
         },
         "ai": {
