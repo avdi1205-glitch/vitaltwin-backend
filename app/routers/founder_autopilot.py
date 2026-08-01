@@ -12,6 +12,8 @@ additionally gets `view_founder_autopilot` (read-only).
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
@@ -26,6 +28,7 @@ from ..core import autopilot_release_readiness as readiness_module
 from ..core import autopilot_score as score_module
 from ..core import autopilot_state as state_module
 from ..core.admin_rbac import require_admin_permission
+from ..core.ai_usage_logger import log_ai_usage
 from ..core.audit import record_audit_event
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
@@ -339,12 +342,20 @@ async def ask_autopilot(data: AskInput, request: Request, authorization: str | N
     context_text = f"Frage: {question}\n\nDaten:\n" + "\n".join(context_lines)
 
     provider = _get_ai_provider()
+    start = time.perf_counter()
     try:
         answer = await provider.generate_recommendation_explanation(system_prompt=AUTOPILOT_SYSTEM_PROMPT, context_text=context_text)
     except AIProviderError as exc:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        log_ai_usage(email=admin.email, feature="autopilot_ask", status="error", error_type=type(exc).__name__, latency_ms=latency_ms)
         _record_query(question=question, answer=None, insufficient_data=False, admin_email=admin.email, error=str(exc))
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    log_ai_usage(
+        email=admin.email, feature="autopilot_ask", status="success",
+        model=getattr(provider, "last_model", None), usage=getattr(provider, "last_usage", None), latency_ms=latency_ms,
+    )
     _record_query(question=question, answer=answer, insufficient_data=False, admin_email=admin.email, error=None)
     return {"answer": answer, "insufficient_data": False}
 

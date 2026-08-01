@@ -13,8 +13,9 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.admin_rbac import AdminPrincipal
+from app.core import ai_usage_logger, error_events, founder_backup_status, founder_releases
 from app.routers import admin as admin_module
-from app.routers.admin import ContentInput, PremiumInput, RoleInput, SuspendInput
+from app.routers.admin import BackupInput, ContentInput, PremiumInput, ReleaseInput, RoleInput, SuspendInput
 
 
 @pytest.fixture
@@ -112,6 +113,26 @@ def fake_supabase(monkeypatch):
     fake = _FakeSupabase()
     monkeypatch.setattr(admin_module, "supabase", fake)
     return fake
+
+
+@pytest.fixture
+def fake_internal_logging_supabase(monkeypatch):
+    """`founder_releases.py`/`founder_backup_status.py`/`error_events.py`/
+    `ai_usage_logger.py` each import their own `supabase` binding (same
+    established pattern as every other core module in this codebase) — so
+    testing admin.py endpoints that call into them requires patching those
+    too, independently of `fake_supabase` (which only patches
+    `admin_module.supabase`). Without this, `system_status()`/`ai_usage()`
+    would silently hit the real Supabase client."""
+    release_fake = _FakeSupabase()
+    backup_fake = _FakeSupabase()
+    error_fake = _FakeSupabase()
+    ai_usage_fake = _FakeSupabase()
+    monkeypatch.setattr(founder_releases, "supabase", release_fake)
+    monkeypatch.setattr(founder_backup_status, "supabase", backup_fake)
+    monkeypatch.setattr(error_events, "supabase", error_fake)
+    monkeypatch.setattr(ai_usage_logger, "supabase", ai_usage_fake)
+    return SimpleNamespace(release=release_fake, backup=backup_fake, error=error_fake, ai_usage=ai_usage_fake)
 
 
 @pytest.fixture
@@ -478,9 +499,87 @@ class TestHonestyNotes:
         assert "coupons_note" in result
 
     @pytest.mark.anyio
-    async def test_system_status_reports_cron_queue_and_health_notes(self, fake_supabase, permission_spy):
+    async def test_system_status_reports_cron_queue_and_health_notes(
+        self, fake_supabase, fake_internal_logging_supabase, permission_spy
+    ):
         result = await admin_module.system_status(authorization="Bearer x")
         assert "note" in result["cron_jobs"]
         assert "note" in result["queues"]
         assert "note" in result["health_connect"]
         assert "note" in result["apple_health"]
+
+    @pytest.mark.anyio
+    async def test_system_status_reports_honest_no_release_no_backup_when_empty(
+        self, fake_supabase, fake_internal_logging_supabase, permission_spy
+    ):
+        result = await admin_module.system_status(authorization="Bearer x")
+        assert "note" in result["release"]
+        assert "note" in result["backup"]
+        assert result["error_events_7d"]["total"] == 0
+
+    @pytest.mark.anyio
+    async def test_ai_usage_reports_real_token_and_cost_summary(
+        self, fake_supabase, fake_internal_logging_supabase, permission_spy
+    ):
+        fake_internal_logging_supabase.ai_usage.store["vt_ai_usage_events"] = {
+            "data": [
+                {"status": "success", "total_tokens": 100, "cost_usd": None, "cost_note": "x", "latency_ms": 200},
+            ]
+        }
+        result = await admin_module.ai_usage(authorization="Bearer x")
+        assert result["usage_today"]["requests"] == 1
+        assert result["usage_30d"]["requests"] == 1
+
+
+class TestReleasesAndBackups:
+    @pytest.mark.anyio
+    async def test_create_release_requires_manage_founder_os(
+        self, fake_supabase, fake_internal_logging_supabase, permission_spy, recorded_audit_events
+    ):
+        fake_internal_logging_supabase.release.store["vt_founder_releases"] = {
+            "insert_result": [{"id": 1, "version": "1.2.0", "build_status": "unbekannt"}]
+        }
+        result = await admin_module.create_release(
+            ReleaseInput(version="1.2.0", description="Test-Release"), authorization="Bearer x"
+        )
+        assert result["version"] == "1.2.0"
+        assert ("Bearer x", "manage_founder_os") in permission_spy
+        assert recorded_audit_events[0]["entity_type"] == "release"
+
+    @pytest.mark.anyio
+    async def test_get_releases_empty_by_default(self, fake_supabase, fake_internal_logging_supabase, permission_spy):
+        result = await admin_module.get_releases(authorization="Bearer x")
+        assert result == {"items": [], "latest": None}
+
+    @pytest.mark.anyio
+    async def test_get_releases_returns_latest_after_create(
+        self, fake_supabase, fake_internal_logging_supabase, permission_spy
+    ):
+        fake_internal_logging_supabase.release.store["vt_founder_releases"] = {
+            "insert_result": [{"id": 1, "version": "1.0.0", "build_status": "unbekannt"}],
+            "data": [{"id": 1, "version": "1.0.0", "build_status": "unbekannt"}],
+        }
+        await admin_module.create_release(ReleaseInput(version="1.0.0"), authorization="Bearer x")
+        result = await admin_module.get_releases(authorization="Bearer x")
+        assert result["latest"]["version"] == "1.0.0"
+
+    @pytest.mark.anyio
+    async def test_create_backup_requires_manage_founder_os(
+        self, fake_supabase, fake_internal_logging_supabase, permission_spy, recorded_audit_events
+    ):
+        fake_internal_logging_supabase.backup.store["vt_founder_backup_status"] = {
+            "insert_result": [{"id": 1, "status": "erfolgreich"}]
+        }
+        result = await admin_module.create_backup(BackupInput(status="erfolgreich"), authorization="Bearer x")
+        assert result["status"] == "erfolgreich"
+        assert ("Bearer x", "manage_founder_os") in permission_spy
+
+    @pytest.mark.anyio
+    async def test_create_backup_rejects_invalid_status(self):
+        with pytest.raises(Exception):
+            BackupInput(status="not_a_real_status")
+
+    @pytest.mark.anyio
+    async def test_get_backups_empty_by_default(self, fake_supabase, fake_internal_logging_supabase, permission_spy):
+        result = await admin_module.get_backups(authorization="Bearer x")
+        assert result == {"items": [], "latest": None}

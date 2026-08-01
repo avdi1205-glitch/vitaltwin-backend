@@ -13,6 +13,8 @@ oder Super Admin dürfen ... Dokumente endgültig archivieren").
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
@@ -26,6 +28,7 @@ from ..core import documentation_search as search_module
 from ..core import documentation_stale_detection as stale_module
 from ..core import release_notes_engine
 from ..core.admin_rbac import require_admin_permission
+from ..core.ai_usage_logger import log_ai_usage
 from ..core.audit import record_audit_event
 from ..core.concurrency import run_parallel
 from ..core.rate_limit import enforce_rate_limit
@@ -376,12 +379,20 @@ async def ask_documentation(data: AskInput, request: Request, authorization: str
     context_text = f"Frage: {question}\n\nDokumentation:\n" + "\n".join(context_lines)
 
     provider = _get_ai_provider()
+    start = time.perf_counter()
     try:
         answer = await provider.generate_recommendation_explanation(system_prompt=DOC_ASSISTANT_SYSTEM_PROMPT, context_text=context_text)
     except AIProviderError as exc:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        log_ai_usage(email=admin.email, feature="documentation_ask", status="error", error_type=type(exc).__name__, latency_ms=latency_ms)
         _record_query(question=question, answer=None, insufficient_data=False, admin_email=admin.email, ai_provider="openai", error=str(exc))
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    log_ai_usage(
+        email=admin.email, feature="documentation_ask", status="success",
+        model=getattr(provider, "last_model", None), usage=getattr(provider, "last_usage", None), latency_ms=latency_ms,
+    )
     _record_query(question=question, answer=answer, insufficient_data=False, admin_email=admin.email, ai_provider="openai", error=None)
     return {"answer": answer, "insufficient_data": False}
 

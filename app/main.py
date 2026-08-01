@@ -1,5 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,6 +19,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Central error-event logging (Founder OS internal foundation #7).
+
+    Starlette dispatches by most-specific registered handler, so any
+    `HTTPException` a route raises intentionally still goes to FastAPI's own
+    built-in handler, never here — this only ever sees genuinely unhandled
+    exceptions (real bugs), which is exactly the honest, narrow scope of
+    this internal error log (see docs/FOUNDER_OS_MISSING_INTEGRATIONS.md for
+    what a real external tool like Sentry would add on top)."""
+    from .core.error_events import log_error_event
+    from .core.system_events import log_system_event
+
+    log_error_event(source=str(request.url.path), error_type=type(exc).__name__, message=str(exc))
+    log_system_event(
+        event_type="unhandled_exception", severity="error", source=str(request.url.path),
+        message=type(exc).__name__,
+    )
+    return JSONResponse(status_code=500, content={"detail": "Interner Serverfehler."})
+
+
+@app.on_event("startup")
+async def _log_startup_event() -> None:
+    from .core.system_events import log_system_event
+
+    log_system_event(event_type="server_start", severity="info", source="app.main", message="Backend gestartet.")
+
 
 from .routers import twin, users, payments, beta, profile, chat, recommendations, twin_memory, daily_planning, privacy, admin, contact, notifications, affiliate, affiliate_admin, founder, founder_briefing, founder_tasks, founder_approval, founder_business_coach, founder_affiliate_intelligence, founder_automation, founder_ceo_intelligence, founder_documentation, founder_autopilot, health
 

@@ -34,6 +34,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from ..core.auth import require_email as _require_email_dependency
+from ..core.ai_usage_logger import log_ai_usage
 from ..core.plans import get_chat_daily_limit, get_context_char_limit
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
@@ -404,13 +405,22 @@ async def ask_twin(data: ChatRequest, request: Request, authorization: str | Non
     system_prompt = build_conversation_system_prompt(context_text=context_text, language=language)
 
     provider = _get_ai_provider()
+    start = time.perf_counter()
     try:
         structured = await provider.generate_twin_response(system_prompt=system_prompt, user_message=data.message)
     except AIProviderTimeoutError as exc:
+        log_ai_usage(
+            email=email, feature="twin_chat", status="error", error_type="AIProviderTimeoutError",
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
         raise HTTPException(
             status_code=504, detail="Der Twin-Chat antwortet gerade zu langsam. Bitte versuche es erneut."
         ) from exc
     except AIRateLimitError as exc:
+        log_ai_usage(
+            email=email, feature="twin_chat", status="error", error_type="AIRateLimitError",
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
         raise HTTPException(
             status_code=503,
             detail="Der Twin-Chat ist gerade stark ausgelastet. Bitte versuche es gleich noch einmal.",
@@ -419,6 +429,11 @@ async def ask_twin(data: ChatRequest, request: Request, authorization: str | Non
         # Etappe 7 §2/§5: never store or forward an unvalidated AI output —
         # fall back to a safe, honest message. The call still happened (and
         # therefore still costs), so usage is still incremented.
+        log_ai_usage(
+            email=email, feature="twin_chat", status="error", error_type="AIResponseValidationError",
+            model=getattr(provider, "last_model", None), usage=getattr(provider, "last_usage", None),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
         _increment_usage(email, usage_row)
         return {
             "reply": "Deine Antwort konnte nicht sicher verarbeitet werden. Bitte versuche es erneut.",
@@ -429,9 +444,19 @@ async def ask_twin(data: ChatRequest, request: Request, authorization: str | Non
             "context_truncated": truncated,
         }
     except AIProviderError as exc:
+        log_ai_usage(
+            email=email, feature="twin_chat", status="error", error_type="AIProviderError",
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
         raise HTTPException(
             status_code=502, detail="Der Twin-Chat ist gerade nicht erreichbar. Bitte versuche es in Kürze erneut."
         ) from exc
+
+    log_ai_usage(
+        email=email, feature="twin_chat", status="success",
+        model=getattr(provider, "last_model", None), usage=getattr(provider, "last_usage", None),
+        latency_ms=int((time.perf_counter() - start) * 1000),
+    )
 
     reply_text = structured.reply
     reply_sources = sources or [{"type": s.type, "label": s.label} for s in structured.sources]

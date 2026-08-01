@@ -30,6 +30,7 @@ from ..core import founder_business_goals as goals_module
 from ..core import founder_business_insight_engine as insight_engine
 from ..core import founder_business_metrics as metrics
 from ..core.admin_rbac import require_admin_permission
+from ..core.ai_usage_logger import log_ai_usage
 from ..core.audit import record_audit_event
 from ..core.concurrency import run_parallel
 from ..core.rate_limit import enforce_rate_limit
@@ -390,12 +391,21 @@ async def ask_business_coach(data: AskInput, request: Request, authorization: st
         latency_ms = int((time.perf_counter() - start) * 1000)
     except AIProviderError as exc:
         latency_ms = int((time.perf_counter() - start) * 1000)
+        log_ai_usage(
+            email=admin.email, feature="business_coach_ask", status="error", error_type=type(exc).__name__,
+            latency_ms=latency_ms,
+        )
         _record_query(
             question=question, answer=None, insufficient_data=False, admin_email=admin.email,
             ai_provider="openai", latency_ms=latency_ms, error=str(exc),
         )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    log_ai_usage(
+        email=admin.email, feature="business_coach_ask", status="success",
+        model=getattr(provider, "last_model", None), usage=getattr(provider, "last_usage", None),
+        latency_ms=latency_ms,
+    )
     _record_query(
         question=question, answer=answer, insufficient_data=False, admin_email=admin.email,
         ai_provider="openai", latency_ms=latency_ms, error=None,

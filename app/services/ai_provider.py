@@ -143,6 +143,13 @@ class OpenAIProvider(AIProvider):
         self._max_retries = max_retries
         self._transport = transport
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        # Set after every successful call — read by callers (e.g. routers)
+        # via `getattr(provider, "last_usage", None)` to log real token
+        # counts centrally (`core/ai_usage_logger.py`). Deliberately NOT part
+        # of the `AIProvider` interface/return values, so existing callers
+        # and test fake providers keep working unchanged.
+        self.last_usage: dict[str, object] | None = None
+        self.last_model: str | None = None
 
     def _resolve_api_key(self) -> str:
         key = (self._api_key or os.getenv("OPENAI_API_KEY", "")).strip()
@@ -193,15 +200,18 @@ class OpenAIProvider(AIProvider):
                 raise AIProviderUnavailableError("Der Twin-Chat ist gerade nicht erreichbar.")
 
             try:
-                return response.json()
+                data = response.json()
             except Exception as exc:
                 raise AIResponseValidationError("Antwort konnte nicht verarbeitet werden.") from exc
+            self.last_usage = data.get("usage") if isinstance(data, dict) else None
+            return data
 
         raise last_error
 
     async def _generate_plain_text(self, *, system_prompt: str, user_message: str) -> str:
         api_key = self._resolve_api_key()
         model = self._resolve_model()
+        self.last_model = model
         payload = {
             "model": model,
             "messages": [
@@ -222,6 +232,7 @@ class OpenAIProvider(AIProvider):
     async def generate_twin_response(self, *, system_prompt: str, user_message: str) -> TwinAIResponse:
         api_key = self._resolve_api_key()
         model = self._resolve_model()
+        self.last_model = model
         truncated_message = user_message[:MAX_INPUT_LENGTH]
 
         payload = {

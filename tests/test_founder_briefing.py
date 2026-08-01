@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.routers import founder_briefing as briefing_module
+from app.core import ai_usage_logger, founder_backup_status, founder_releases
 
 
 @pytest.fixture
@@ -62,6 +63,38 @@ def _empty_supabase(monkeypatch):
     return fake
 
 
+@pytest.fixture(autouse=True)
+def fake_internal_logging(monkeypatch):
+    """`ai_usage_logger.py`/`founder_releases.py`/`founder_backup_status.py`
+    each import their own `supabase` binding — patch all three to empty
+    (reachable, zero-row) fakes so these tests never hit the real Supabase
+    client, and "genuinely zero/none" results are exercised deterministically."""
+
+    class _EmptyQuery:
+        def select(self, *a, **k):
+            return self
+
+        def gte(self, *a, **k):
+            return self
+
+        def order(self, *a, **k):
+            return self
+
+        def limit(self, *a, **k):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[], count=0)
+
+    class _EmptySupabase:
+        def table(self, name):
+            return _EmptyQuery()
+
+    monkeypatch.setattr(ai_usage_logger, "supabase", _EmptySupabase())
+    monkeypatch.setattr(founder_releases, "supabase", _EmptySupabase())
+    monkeypatch.setattr(founder_backup_status, "supabase", _EmptySupabase())
+
+
 class TestFounderDailyBriefing:
     @pytest.mark.anyio
     async def test_requires_view_founder_os_permission(self, briefing_permission_spy, monkeypatch):
@@ -80,11 +113,14 @@ class TestFounderDailyBriefing:
         assert result["users"]["cancellations"] is None
 
     @pytest.mark.anyio
-    async def test_ai_cost_and_errors_are_honestly_none(self, briefing_permission_spy, monkeypatch):
+    async def test_ai_cost_is_honestly_none_but_errors_are_a_real_zero(self, briefing_permission_spy, monkeypatch):
         _empty_supabase(monkeypatch)
         result = await briefing_module.founder_daily_briefing(authorization="Bearer x")
+        # Cost stays honestly None until OPENAI_*_PRICE_PER_1K_USD is configured.
         assert result["ai"]["cost"] is None
-        assert result["ai"]["errors"] is None
+        # Errors are a real, zero-row aggregation from vt_ai_usage_events —
+        # genuinely zero (not a fabricated placeholder).
+        assert result["ai"]["errors"] == 0
         assert result["ai"]["slow_responses"] is None
 
     @pytest.mark.anyio

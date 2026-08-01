@@ -23,6 +23,7 @@ Founder-OS detector.
 
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -34,6 +35,7 @@ from ..core import affiliate_ranking as ranking
 from ..core import founder_approval_detector
 from ..core import founder_business_metrics as metrics
 from ..core.admin_rbac import require_admin_permission
+from ..core.ai_usage_logger import log_ai_usage
 from ..core.affiliate_intelligence_detector import run_affiliate_intelligence_detection
 from ..core.affiliate_product_health import compute_product_health
 from ..core.affiliate_review_rules import review_product_rule_based, summarize_approval_assistant
@@ -380,10 +382,20 @@ async def ai_review_product(product_id: str, request: Request, authorization: st
     context_text = f"Titel: {product.get('title')}\nBeschreibung: {product.get('description') or '(keine)'}\nMarke: {product.get('brand') or '(unbekannt)'}"
 
     provider = _get_ai_provider()
+    start = time.perf_counter()
     try:
         explanation = await provider.generate_recommendation_explanation(system_prompt=system_prompt, context_text=context_text)
     except AIProviderError as exc:
+        log_ai_usage(
+            email=admin.email, feature="affiliate_ai_review", status="error", error_type=type(exc).__name__,
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    log_ai_usage(
+        email=admin.email, feature="affiliate_ai_review", status="success",
+        model=getattr(provider, "last_model", None), usage=getattr(provider, "last_usage", None),
+        latency_ms=int((time.perf_counter() - start) * 1000),
+    )
 
     try:
         supabase.table(PRODUCT_TABLE).update({"ai_reviewed": True}).eq("id", product_id).execute()

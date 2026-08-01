@@ -34,7 +34,10 @@ from ..core.admin_rbac import require_admin_permission
 from ..core import automation_engine
 from ..core import executive_summary
 from ..core import documentation_score
+from ..core.ai_usage_logger import get_ai_usage_summary
 from ..core.concurrency import run_parallel
+from ..core.founder_backup_status import get_latest_backup_status
+from ..core.founder_releases import get_latest_release
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -160,6 +163,9 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         automation_summary,
         ceo_summary,
         documentation_summary,
+        ai_usage_today,
+        latest_release,
+        latest_backup,
     ) = run_parallel(
         _affiliate_revenue_today,
         lambda: _count(USER_TABLE, gte=("created_at", today_start)),
@@ -175,6 +181,9 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         _automation_summary,
         _ceo_summary,
         _documentation_summary,
+        lambda: get_ai_usage_summary(days=1),
+        get_latest_release,
+        get_latest_backup_status,
     )
 
     if new_users_yesterday is not None and new_users_today is not None:
@@ -206,12 +215,12 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
 
     ai = {
         "requests_today": ai_requests_today,
-        "cost": None,
-        "cost_note": NO_COST_NOTE,
-        "errors": None,
-        "errors_note": NO_ERROR_TRACKING_NOTE,
+        "cost": ai_usage_today.get("cost_usd"),
+        "cost_note": ai_usage_today.get("cost_note"),
+        "errors": ai_usage_today.get("errors"),
+        "errors_note": None if ai_usage_today.get("errors") is not None else "vt_ai_usage_events nicht erreichbar oder Migration 022 noch nicht ausgeführt.",
         "slow_responses": None,
-        "slow_responses_note": NO_LATENCY_NOTE,
+        "slow_responses_note": "Kein Schwellenwert für 'langsame' Antworten definiert — avg_latency_ms ist über /api/admin/ai/usage verfügbar.",
     }
 
     affiliate = {
@@ -227,10 +236,10 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
         "server_status_note": NO_SERVER_MONITORING_NOTE,
         "database": "reachable" if database_reachable else "unreachable",
         "api_status": "online",
-        "build_status": None,
-        "build_status_note": NO_BUILD_STATUS_NOTE,
-        "backups": None,
-        "backups_note": NO_BACKUP_MONITORING_NOTE,
+        "build_status": latest_release.get("build_status") if latest_release else None,
+        "build_status_note": None if latest_release else "Noch keine Releases erfasst (POST /api/admin/system/releases).",
+        "backups": latest_backup.get("status") if latest_backup else None,
+        "backups_note": None if latest_backup else "Noch keine Backups erfasst (POST /api/admin/system/backups).",
     }
 
     # --- 6. Aufgaben (automatisch generiert) ------------------------------------------

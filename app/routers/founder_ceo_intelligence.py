@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -33,6 +34,7 @@ from ..core import executive_scenarios
 from ..core import executive_scorecard
 from ..core import executive_summary
 from ..core.admin_rbac import require_admin_permission
+from ..core.ai_usage_logger import log_ai_usage
 from ..core.audit import record_audit_event
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
@@ -331,13 +333,21 @@ async def ask_ceo_intelligence(data: AskInput, request: Request, authorization: 
     context_text = f"Frage: {question}\n\nDaten:\n" + "\n".join(context_lines)
 
     provider = _get_ai_provider()
+    start = time.perf_counter()
     try:
         answer = await provider.generate_recommendation_explanation(system_prompt=CEO_SYSTEM_PROMPT, context_text=context_text)
     except AIProviderError as exc:
-        _record_query(question=question, answer=None, insufficient_data=False, admin_email=admin.email, ai_provider="openai", latency_ms=None, error=str(exc))
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        log_ai_usage(email=admin.email, feature="ceo_intelligence_ask", status="error", error_type=type(exc).__name__, latency_ms=latency_ms)
+        _record_query(question=question, answer=None, insufficient_data=False, admin_email=admin.email, ai_provider="openai", latency_ms=latency_ms, error=str(exc))
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    _record_query(question=question, answer=answer, insufficient_data=False, admin_email=admin.email, ai_provider="openai", latency_ms=None, error=None)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    log_ai_usage(
+        email=admin.email, feature="ceo_intelligence_ask", status="success",
+        model=getattr(provider, "last_model", None), usage=getattr(provider, "last_usage", None), latency_ms=latency_ms,
+    )
+    _record_query(question=question, answer=answer, insufficient_data=False, admin_email=admin.email, ai_provider="openai", latency_ms=latency_ms, error=None)
     return {"answer": answer, "insufficient_data": False}
 
 

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.routers import founder as founder_module
+from app.core import ai_usage_logger, founder_releases
 
 
 @pytest.fixture
@@ -89,6 +90,37 @@ def founder_permission_spy(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def fake_internal_logging(monkeypatch):
+    """`ai_usage_logger.py`/`founder_releases.py` each import their own
+    `supabase` binding — patch both to empty (reachable, zero-row) fakes so
+    these tests never hit the real Supabase client, and "genuinely zero"
+    results are exercised deterministically."""
+
+    class _EmptyQuery:
+        def select(self, *a, **k):
+            return self
+
+        def gte(self, *a, **k):
+            return self
+
+        def order(self, *a, **k):
+            return self
+
+        def limit(self, *a, **k):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[], count=0)
+
+    class _EmptySupabase:
+        def table(self, name):
+            return _EmptyQuery()
+
+    monkeypatch.setattr(ai_usage_logger, "supabase", _EmptySupabase())
+    monkeypatch.setattr(founder_releases, "supabase", _EmptySupabase())
+
+
 class TestFounderDashboard:
     @pytest.mark.anyio
     async def test_requires_view_founder_os_permission(self, founder_supabase, founder_permission_spy):
@@ -116,10 +148,14 @@ class TestFounderDashboard:
         assert result["revenue"]["premium_note"]
 
     @pytest.mark.anyio
-    async def test_ai_card_has_no_fabricated_cost_or_errors(self, founder_supabase, founder_permission_spy):
+    async def test_ai_card_reports_real_zero_errors_and_cost_when_not_priced(self, founder_supabase, founder_permission_spy):
         result = await founder_module.founder_dashboard(authorization="Bearer x")
         assert result["ai"]["requests_total"] == 8
-        assert result["ai"]["errors"] is None
+        # Real, zero-row aggregation from vt_ai_usage_events — genuinely
+        # zero (not a fabricated placeholder) since no request happened yet
+        # in this test's fake table.
+        assert result["ai"]["errors"] == 0
+        # Cost stays honestly None until OPENAI_*_PRICE_PER_1K_USD is configured.
         assert result["ai"]["cost"] is None
 
     @pytest.mark.anyio

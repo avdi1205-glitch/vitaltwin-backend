@@ -18,6 +18,7 @@ system data, exactly like every other Founder-OS submodule.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -28,6 +29,7 @@ from ..core import automation_opportunity_detector as opportunity_detector
 from ..core import automation_registry as registry
 from ..core import automation_score as score_module
 from ..core.admin_rbac import require_admin_permission
+from ..core.ai_usage_logger import log_ai_usage
 from ..core.audit import record_audit_event
 from ..core.concurrency import run_parallel
 from ..core.rate_limit import enforce_rate_limit
@@ -373,10 +375,20 @@ async def explain_failure(run_id: str, request: Request, authorization: str | No
         raise HTTPException(status_code=400, detail="Nur für fehlgeschlagene/teilweise fehlgeschlagene Läufe verfügbar.")
     context_text = f"Status: {run.get('status')}\nFehler: {run.get('error')}\nSchritte: {run.get('steps')}"
     provider = _get_ai_provider()
+    start = time.perf_counter()
     try:
         explanation = await provider.generate_recommendation_explanation(system_prompt=FAILURE_EXPLANATION_SYSTEM_PROMPT, context_text=context_text)
     except AIProviderError as exc:
+        log_ai_usage(
+            email=admin.email, feature="automation_explain_failure", status="error", error_type=type(exc).__name__,
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    log_ai_usage(
+        email=admin.email, feature="automation_explain_failure", status="success",
+        model=getattr(provider, "last_model", None), usage=getattr(provider, "last_usage", None),
+        latency_ms=int((time.perf_counter() - start) * 1000),
+    )
     record_audit_event(user_id=None, email=admin.email, action="update", entity_type="automation_run", entity_id=run_id, metadata={"event": "ki_erklaerung_angefordert"})
     return {"explanation": explanation}
 

@@ -30,6 +30,8 @@ from datetime import date, timedelta
 from fastapi import APIRouter, Header
 
 from ..core.admin_rbac import require_admin_permission
+from ..core.ai_usage_logger import get_ai_usage_summary
+from ..core.founder_releases import get_latest_release
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -123,6 +125,8 @@ async def founder_dashboard(authorization: str | None = Header(default=None)):
 
     # --- 5. System -------------------------------------------------------------
     database_reachable = total_users is not None
+    ai_usage_today = get_ai_usage_summary(days=1)
+    latest_release = get_latest_release()
 
     return {
         "users": {
@@ -145,10 +149,10 @@ async def founder_dashboard(authorization: str | None = Header(default=None)):
         "ai": {
             "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             "requests_total": ai_requests_total,
-            "errors": None,
-            "errors_note": "Kein Error-Tracking-System integriert.",
-            "cost": None,
-            "cost_note": "Kein Kosten-Tracking implementiert (erfordert OpenAI-Nutzungs-API-Anbindung).",
+            "errors": ai_usage_today.get("errors"),
+            "errors_note": None if ai_usage_today.get("errors") is not None else "vt_ai_usage_events nicht erreichbar oder Migration 022 noch nicht ausgeführt.",
+            "cost": ai_usage_today.get("cost_usd"),
+            "cost_note": ai_usage_today.get("cost_note"),
         },
         "affiliate": {
             "active_products": active_products,
@@ -160,14 +164,14 @@ async def founder_dashboard(authorization: str | None = Header(default=None)):
             "api": "online",
             "server": None,
             "server_note": "Keine Server-Monitoring-Integration vorhanden.",
-            "build_status": None,
-            "build_status_note": "Keine CI/CD-Status-Integration vorhanden.",
+            "build_status": latest_release.get("build_status") if latest_release else None,
+            "build_status_note": None if latest_release else "Noch keine Releases erfasst (POST /api/admin/system/releases).",
         },
         "tasks": {
             "products_to_review": pending_approval,
             "broken_links": broken_links,
             "open_releases": None,
-            "open_releases_note": "Keine Release-Tracking-Integration vorhanden.",
+            "open_releases_note": "Releases werden nur einzeln erfasst, kein Konzept von 'offenen' Releases.",
             "open_bugs": None,
             "open_bugs_note": "Kein Bug-Tracking-System integriert.",
         },

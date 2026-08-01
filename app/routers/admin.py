@@ -1,4 +1,4 @@
-"""Admin Control Center — VitalTwin Enterprise Release 1.0.
+"""Admin Control Center — VitalTwin Admin Dashboard.
 
 Endpoints (mounted at `/api/admin` in `app/main.py`). Every endpoint calls
 `core/admin_rbac.py::require_admin_permission` first — no admin endpoint in
@@ -34,8 +34,12 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from ..core.admin_rbac import ROLE_PERMISSIONS, require_admin, require_admin_permission
+from ..core.ai_usage_logger import get_ai_usage_summary
 from ..core.audit import record_audit_event
 from ..core.concurrency import run_parallel
+from ..core.error_events import get_error_summary
+from ..core.founder_backup_status import get_latest_backup_status, list_backups, record_backup
+from ..core.founder_releases import get_latest_release, list_releases, record_release
 from ..core.integrations import get_full_integration_report
 from ..core.plans import get_configured_price_id
 from ..core.supabase import supabase
@@ -57,6 +61,7 @@ TWIN_CALC_TABLE = "vt_twin_calculations"
 TWIN_MEMORY_TABLE = "vt_twin_memory"
 TWIN_LEARNING_EVENTS_TABLE = "vt_twin_learning_events"
 RECOMMENDATION_FEEDBACK_TABLE = "vt_recommendation_feedback"
+BETA_APPLICATION_TABLE = "vt_beta_applications"
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -105,6 +110,38 @@ class RoleInput(BaseModel):
 
 class PremiumInput(BaseModel):
     premium: bool
+
+
+class ReleaseInput(BaseModel):
+    version: str
+    git_commit_sha: str | None = None
+    environment: str = "production"
+    description: str | None = None
+    build_status: str = "unbekannt"
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        value = value.strip()
+        if not (1 <= len(value) <= 100):
+            raise ValueError("Version muss 1-100 Zeichen lang sein.")
+        return value
+
+
+class BackupInput(BaseModel):
+    status: str
+    backup_type: str = "database"
+    size_bytes: int | None = None
+    completed_at: str | None = None
+    note: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        allowed = {"erfolgreich", "fehlgeschlagen", "laeuft"}
+        if value not in allowed:
+            raise ValueError(f"Ungültiger Status. Erlaubt: {', '.join(sorted(allowed))}")
+        return value
 
 
 class ContentInput(BaseModel):
@@ -175,12 +212,21 @@ async def admin_dashboard(authorization: str | None = Header(default=None)):
         active_users_7d = None
 
     open_feedback_count = _count_rows(FEEDBACK_TABLE)
+    beta_applications_total = _count_rows(BETA_APPLICATION_TABLE)
 
     try:
         usage_rows = supabase.table(CHAT_USAGE_TABLE).select("count").eq("usage_date", today.isoformat()).execute().data or []
         ai_requests_today: int | None = sum(int(row.get("count", 0)) for row in usage_rows)
     except Exception:
         ai_requests_today = None
+
+    try:
+        latest_audit = (
+            supabase.table(AUDIT_TABLE).select("action,entity_type,email,created_at").order("created_at", desc=True).limit(1).execute().data or []
+        )
+        latest_activity = latest_audit[0] if latest_audit else None
+    except Exception:
+        latest_activity = None
 
     return {
         "user_count": total_users,
@@ -191,6 +237,9 @@ async def admin_dashboard(authorization: str | None = Header(default=None)):
         "active_users_7d": active_users_7d,
         "ai_requests_today": ai_requests_today,
         "open_feedback_count": open_feedback_count,
+        "beta_applications_total": beta_applications_total,
+        "beta_applications_note": "Zählt eingegangene Beta-Bewerbungen — es gibt aktuell keinen separaten Freigabe-/Aktivierungsstatus für Beta-Tester.",
+        "latest_activity": latest_activity,
         "stripe_configured": bool(os.getenv("STRIPE_SECRET_KEY", "").strip()),
         "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
         "supabase_reachable": total_users is not None,
@@ -458,6 +507,9 @@ async def get_permission_matrix(authorization: str | None = Header(default=None)
 async def system_status(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_system_status")
     db_reachable = _count_rows(USER_TABLE) is not None
+    latest_release = get_latest_release()
+    latest_backup = get_latest_backup_status()
+    error_summary = get_error_summary(days=7)
     return {
         "database": {"status": "reachable" if db_reachable else "unreachable"},
         "openai": {"configured": bool(os.getenv("OPENAI_API_KEY", "").strip())},
@@ -467,7 +519,66 @@ async def system_status(authorization: str | None = Header(default=None)):
         "queues": {"note": "Keine Message-Queue im aktuellen System implementiert."},
         "health_connect": {"note": "Keine Health-Connect-Anbindung vorhanden."},
         "apple_health": {"note": "Keine Apple-Health-Anbindung vorhanden."},
+        "release": latest_release or {"note": "Noch keine Releases erfasst — POST /api/admin/system/releases verwenden."},
+        "backup": latest_backup or {"note": "Noch keine Backups erfasst — POST /api/admin/system/backups verwenden."},
+        "error_events_7d": error_summary,
+        "build_status_note": (
+            "Kein CI/CD-Provider angebunden (kein GITHUB_ACTIONS/VERCEL/RAILWAY-Webhook konfiguriert) — "
+            "Build-Status wird ausschließlich über manuell/durch ein Deploy-Skript erfasste Releases oben abgebildet."
+        ),
+        "backup_provider_note": (
+            "Kein automatisierter Backup-Provider angebunden — Supabase-Backups laufen (falls im Supabase-Tarif "
+            "enthalten) außerhalb dieser App und werden hier nicht automatisch erkannt."
+        ),
     }
+
+
+@router.post("/system/releases")
+async def create_release(data: ReleaseInput, authorization: str | None = Header(default=None)):
+    admin = require_admin_permission(authorization, "manage_founder_os")
+    release = record_release(
+        version=data.version,
+        released_by=admin.email,
+        git_commit_sha=data.git_commit_sha,
+        environment=data.environment,
+        description=data.description,
+        build_status=data.build_status,
+    )
+    if release is None:
+        raise HTTPException(status_code=500, detail="Release konnte nicht gespeichert werden.")
+    record_audit_event(user_id=None, email=admin.email, action="create", entity_type="release", entity_id=data.version)
+    return release
+
+
+@router.get("/system/releases")
+async def get_releases(authorization: str | None = Header(default=None)):
+    require_admin_permission(authorization, "view_system_status")
+    items = list_releases()
+    return {"items": items, "latest": items[0] if items else None}
+
+
+@router.post("/system/backups")
+async def create_backup(data: BackupInput, authorization: str | None = Header(default=None)):
+    admin = require_admin_permission(authorization, "manage_founder_os")
+    backup = record_backup(
+        status=data.status,
+        backup_type=data.backup_type,
+        size_bytes=data.size_bytes,
+        completed_at=data.completed_at,
+        note=data.note,
+        recorded_by=admin.email,
+    )
+    if backup is None:
+        raise HTTPException(status_code=500, detail="Backup-Status konnte nicht gespeichert werden.")
+    record_audit_event(user_id=None, email=admin.email, action="create", entity_type="backup_status", entity_id=str(backup.get("id")))
+    return backup
+
+
+@router.get("/system/backups")
+async def get_backups(authorization: str | None = Header(default=None)):
+    require_admin_permission(authorization, "view_system_status")
+    items = list_backups()
+    return {"items": items, "latest": items[0] if items else None}
 
 
 # ---------------------------------------------------------------------------
@@ -780,15 +891,20 @@ async def ai_usage(authorization: str | None = Header(default=None)):
     unique_users = len({row["email"] for row in rows if row.get("email")})
     requests_today = sum(int(row.get("count", 0)) for row in rows if row.get("usage_date") == today.isoformat())
 
+    usage_today = get_ai_usage_summary(days=1)
+    usage_30d = get_ai_usage_summary(days=30)
+
     return {
         "model_configured": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
         "total_requests_all_time": total_requests,
         "unique_users_all_time": unique_users,
         "requests_today": requests_today,
-        "token_usage_note": "Kein Token-/Kosten-Tracking pro Anfrage implementiert (erfordert OpenAI-Nutzungs-API-Anbindung).",
-        "response_time_note": "Keine Antwortzeit-Messung implementiert.",
+        "token_usage_note": "Token-Zahlen werden seit Migration 022 pro Anfrage in vt_ai_usage_events erfasst (siehe usage_today/usage_30d).",
+        "response_time_note": "Antwortzeit (avg_latency_ms) wird seit Migration 022 pro Anfrage erfasst (siehe usage_today/usage_30d).",
         "prompt_versions_note": "Kein Prompt-Versionierungssystem — der Systemprompt ist aktuell fest im Code (`services/twin_conversation.py`).",
+        "usage_today": usage_today,
+        "usage_30d": usage_30d,
     }
 
 
