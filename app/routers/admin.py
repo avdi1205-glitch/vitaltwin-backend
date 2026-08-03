@@ -35,6 +35,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from ..core.admin_rbac import ROLE_PERMISSIONS, require_admin, require_admin_permission
+from ..core.account_deletion import purge_all_user_data
 from ..core.ai_usage_logger import get_ai_usage_summary
 from ..core.audit import record_audit_event
 from ..core.concurrency import run_parallel
@@ -53,6 +54,7 @@ from .users import set_premium_by_email
 router = APIRouter()
 
 USER_TABLE = "vt_users"
+PROFILE_TABLE = "vt_user_profiles"
 ADMIN_ROLE_TABLE = "vt_admin_roles"
 LOGIN_EVENT_TABLE = "vt_login_events"
 CONTENT_TABLE = "vt_content_items"
@@ -502,6 +504,48 @@ async def get_user_login_history(email: str, limit: int = 20, authorization: str
     except Exception:
         rows = []
     return {"items": rows}
+
+
+@router.get("/users/deletion-requests")
+async def list_deletion_requests(authorization: str | None = Header(default=None)):
+    """Surfaces the deletion requests written by `routers/profile.py::
+    request_deletion` (Etappe 9 §2) — previously there was no admin-facing
+    way to even see these, only a manual DB lookup."""
+    require_admin_permission(authorization, "view_users")
+    try:
+        rows = (
+            supabase.table(PROFILE_TABLE)
+            .select("email,display_name,deletion_requested_at")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
+    items = [row for row in rows if row.get("deletion_requested_at")]
+    items.sort(key=lambda row: row["deletion_requested_at"], reverse=True)
+    return {"items": items}
+
+
+@router.post("/users/{email}/deletion-requests/complete")
+async def complete_deletion_request(email: str, authorization: str | None = Header(default=None)):
+    """Actually executes an already-requested deletion (irreversible) —
+    deletes every row scoped to this email across all user-data tables,
+    then the account itself. Never automatic; an admin must trigger this
+    explicitly after reviewing the request."""
+    admin = require_admin_permission(authorization, "manage_users")
+    email = email.strip().lower()
+    deleted_rows = purge_all_user_data(email)
+
+    record_audit_event(
+        user_id=None,
+        email=admin.email,
+        action="delete",
+        entity_type="user_account",
+        entity_id=email,
+        metadata={"deleted_rows": deleted_rows},
+    )
+    return {"message": "Konto und alle zugehörigen Daten wurden gelöscht.", "email": email, "deleted_rows": deleted_rows}
 
 
 # ---------------------------------------------------------------------------

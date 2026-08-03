@@ -304,6 +304,47 @@ class TestGetUserDetail:
         assert "consents" in result
 
 
+class TestDeletionRequests:
+    @pytest.mark.anyio
+    async def test_list_only_returns_rows_with_a_deletion_request(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_user_profiles"] = {
+            "data": [
+                {"email": "a@example.com", "display_name": "A", "deletion_requested_at": "2026-08-01T00:00:00Z"},
+                {"email": "b@example.com", "display_name": "B", "deletion_requested_at": None},
+            ]
+        }
+        result = await admin_module.list_deletion_requests(authorization="Bearer x")
+        assert [row["email"] for row in result["items"]] == ["a@example.com"]
+
+    @pytest.mark.anyio
+    async def test_list_requires_view_users_permission(self, fake_supabase, permission_spy):
+        await admin_module.list_deletion_requests(authorization="Bearer x")
+        assert permission_spy[-1][1] == "view_users"
+
+    @pytest.mark.anyio
+    async def test_complete_requires_manage_users_and_purges_and_audits(
+        self, monkeypatch, permission_spy, recorded_audit_events
+    ):
+        from app.core import account_deletion
+
+        recorded_calls: list[str] = []
+        monkeypatch.setattr(
+            account_deletion,
+            "purge_all_user_data",
+            lambda email: recorded_calls.append(email) or {"vt_users": 1, "vt_habits": 2},
+        )
+        monkeypatch.setattr(admin_module, "purge_all_user_data", account_deletion.purge_all_user_data)
+
+        result = await admin_module.complete_deletion_request("user@example.com", authorization="Bearer x")
+
+        assert permission_spy[-1][1] == "manage_users"
+        assert recorded_calls == ["user@example.com"]
+        assert result["deleted_rows"] == {"vt_users": 1, "vt_habits": 2}
+        assert recorded_audit_events[-1]["action"] == "delete"
+        assert recorded_audit_events[-1]["entity_type"] == "user_account"
+        assert recorded_audit_events[-1]["entity_id"] == "user@example.com"
+
+
 class TestSuspendUnsuspend:
     @pytest.mark.anyio
     async def test_suspend_updates_row_and_records_audit_event(self, fake_supabase, permission_spy, recorded_audit_events):
