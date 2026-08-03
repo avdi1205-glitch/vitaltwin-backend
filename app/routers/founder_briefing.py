@@ -50,19 +50,13 @@ AFFILIATE_PRODUCT_TABLE = "vt_affiliate_products"
 AFFILIATE_EVENT_TABLE = "vt_affiliate_events"
 FEEDBACK_TABLE = "vt_user_feedback"
 
-NO_STRIPE_REPORTING_NOTE = "Kein Stripe-Reporting implementiert (erfordert Stripe-Reporting-API-Anbindung)."
+NO_STRIPE_DATA_NOTE = "vt_stripe_payments nicht erreichbar oder Migration 023 noch nicht ausgeführt."
 NO_PREMIUM_TIMESTAMP_NOTE = (
     "Keine zeitgestempelten Premium-Aktivierungen gespeichert (der Stripe-Webhook setzt nur das "
     "boolesche premium-Flag, ohne Aktivierungsdatum) — daher nicht rückwirkend zählbar."
 )
-NO_CANCELLATION_NOTE = "Keine Kündigungs-/Downgrade-Erfassung implementiert (Stripe-Webhook behandelt nur checkout.session.completed)."
-NO_COST_NOTE = "Kein Kosten-Tracking implementiert (erfordert OpenAI-Nutzungs-API-Anbindung)."
-NO_ERROR_TRACKING_NOTE = "Kein Error-Tracking-System integriert."
-NO_LATENCY_NOTE = "Keine Antwortzeit-Messung implementiert."
+NO_CANCELLATION_NOTE = "vt_stripe_subscriptions nicht erreichbar oder Migration 023 noch nicht ausgeführt."
 NO_SERVER_MONITORING_NOTE = "Keine Server-Monitoring-Integration vorhanden."
-NO_BUILD_STATUS_NOTE = "Keine CI/CD-Status-Integration vorhanden."
-NO_BACKUP_MONITORING_NOTE = "Keine Backup-Monitoring-Integration vorhanden — Backups werden ausschließlich von Supabase selbst verwaltet."
-NO_RELEASE_TRACKING_NOTE = "Keine Release-Tracking-Integration vorhanden."
 NO_BUG_TRACKING_NOTE = "Kein Bug-Tracking-System integriert."
 NO_DOC_FRESHNESS_NOTE = "Keine automatische Dokumentations-Aktualitätsprüfung implementiert."
 
@@ -200,9 +194,9 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
 
     business = {
         "revenue_today": revenue_today,
-        "revenue_today_note": None if revenue_today is not None else NO_STRIPE_REPORTING_NOTE,
+        "revenue_today_note": None if revenue_today is not None else NO_STRIPE_DATA_NOTE,
         "revenue_yesterday": revenue_yesterday,
-        "revenue_yesterday_note": None if revenue_yesterday is not None else NO_STRIPE_REPORTING_NOTE,
+        "revenue_yesterday_note": None if revenue_yesterday is not None else NO_STRIPE_DATA_NOTE,
         "revenue_month": revenue_month_summary["revenue_month"],
         "revenue_month_note": revenue_month_summary["note"],
         "premium_sales": None,
@@ -251,7 +245,11 @@ async def founder_daily_briefing(authorization: str | None = Header(default=None
     # --- 6. Aufgaben (automatisch generiert) ------------------------------------------
     tasks = [
         {"label": "Produkte prüfen", "value": pending_approval, "note": None},
-        {"label": "Releases prüfen", "value": None, "note": NO_RELEASE_TRACKING_NOTE},
+        {
+            "label": "Releases prüfen",
+            "value": latest_release.get("version") if latest_release else None,
+            "note": None if latest_release else "Noch keine Releases erfasst (POST /api/admin/system/releases).",
+        },
         {"label": "Bugs prüfen", "value": None, "note": NO_BUG_TRACKING_NOTE},
         {"label": "Support prüfen", "value": new_feedback_today, "note": None},
         {"label": "Dokumentation prüfen", "value": None, "note": NO_DOC_FRESHNESS_NOTE},

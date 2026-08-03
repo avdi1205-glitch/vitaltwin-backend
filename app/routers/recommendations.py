@@ -27,6 +27,7 @@ from pydantic import BaseModel, field_validator
 
 from ..core.audit import record_audit_event
 from ..core.auth import require_email as _require_email_dependency
+from ..core.concurrency import run_parallel
 from ..core.learning_events import record_learning_event
 from ..core.supabase import supabase
 from ..core.validation import MAX_FEEDBACK_COMMENT, validate_short_text
@@ -189,25 +190,9 @@ def _require_own_recommendation(email: str, recommendation_id: str) -> dict[str,
     return response.data[0]
 
 
-def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
-    try:
-        habits_raw = (
-            supabase.table(HABIT_TABLE).select("*").eq("email", email).eq("status", "active").execute().data or []
-        )
-    except Exception:
-        return []
-    try:
-        habit_entries = (
-            supabase.table(HABIT_ENTRY_TABLE)
-            .select("habit_id,entry_date,completed")
-            .eq("email", email)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        habit_entries = []
-
+def _combine_habits_with_stats(
+    habits_raw: list[dict[str, object]], habit_entries: list[dict[str, object]], today: date
+) -> list[dict[str, object]]:
     entries_by_habit: dict[str, list[dict[str, object]]] = {}
     for entry in habit_entries:
         entries_by_habit.setdefault(str(entry.get("habit_id")), []).append(entry)
@@ -228,49 +213,74 @@ async def list_recommendations(authorization: str | None = Header(default=None))
     today = date.today()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    try:
-        daily_entries = (
-            supabase.table(DAILY_ENTRY_TABLE)
-            .select("*")
-            .eq("email", email)
-            .order("entry_date", desc=True)
-            .limit(30)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        daily_entries = []
+    def _daily_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(DAILY_ENTRY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .order("entry_date", desc=True)
+                .limit(30)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
 
-    habits = _load_habits_with_stats(email, today)
+    def _habits_raw() -> list[dict[str, object]]:
+        try:
+            return supabase.table(HABIT_TABLE).select("*").eq("email", email).eq("status", "active").execute().data or []
+        except Exception:
+            return []
 
-    try:
-        goals = (
-            supabase.table(GOAL_TABLE)
-            .select("*")
-            .eq("email", email)
-            .eq("status", "active")
-            .is_("deleted_at", "null")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        goals = []
+    def _habit_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(HABIT_ENTRY_TABLE)
+                .select("habit_id,entry_date,completed")
+                .eq("email", email)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
 
-    try:
-        history = (
-            supabase.table(RECOMMENDATION_TABLE)
-            .select("*")
-            .eq("email", email)
-            .order("created_at", desc=True)
-            .limit(100)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        history = []
+    def _goals() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(GOAL_TABLE)
+                .select("*")
+                .eq("email", email)
+                .eq("status", "active")
+                .is_("deleted_at", "null")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _history() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(RECOMMENDATION_TABLE)
+                .select("*")
+                .eq("email", email)
+                .order("created_at", desc=True)
+                .limit(100)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    daily_entries, habits_raw, habit_entries, goals, history = run_parallel(
+        _daily_entries, _habits_raw, _habit_entries, _goals, _history
+    )
+    habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
 
     # Expire anything past valid_until that's still "proposed" (§1 status
     # lifecycle) before deciding what's currently active.

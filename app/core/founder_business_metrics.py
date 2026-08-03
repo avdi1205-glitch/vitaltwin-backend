@@ -24,8 +24,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+from .ai_usage_logger import get_ai_usage_summary
 from .concurrency import run_parallel
 from .supabase import supabase
+from . import stripe_billing
 
 USER_TABLE = "vt_users"
 DAILY_ENTRY_TABLE = "vt_daily_wellness_entries"
@@ -39,13 +41,12 @@ APPROVAL_TABLE = "vt_founder_approvals"
 
 MIN_GROUP_SIZE = 5
 
-NO_STRIPE_REPORTING_NOTE = "Kein Stripe-Reporting implementiert (erfordert Stripe-Reporting-API-Anbindung)."
 NO_PREMIUM_TIMESTAMP_NOTE = (
     "Keine zeitgestempelten Premium-Aktivierungen gespeichert — der Stripe-Webhook setzt nur das "
     "boolesche premium-Flag ohne Datum, daher nicht rückwirkend zählbar."
 )
-NO_CANCELLATION_NOTE = "Keine Kündigungs-/Downgrade-Erfassung implementiert (Stripe-Webhook behandelt nur checkout.session.completed)."
-NO_COST_NOTE = "Kein Kosten-Tracking implementiert (erfordert OpenAI-Nutzungs-API-Anbindung)."
+NO_CANCELLATION_NOTE = "vt_stripe_subscriptions nicht erreichbar oder Migration 023 noch nicht ausgeführt."
+NO_COST_NOTE = "vt_ai_usage_events nicht erreichbar oder Migration 022 noch nicht ausgeführt."
 NO_INFRA_COST_NOTE = "Keine Infrastruktur-Kosten-Integration vorhanden (kein Railway-/Vercel-Billing-API-Zugriff)."
 NO_MRR_NOTE = (
     "Kein wiederkehrender Monatsumsatz berechenbar — vt_users speichert nur ein boolesches premium-Flag, "
@@ -121,7 +122,7 @@ def get_business_dashboard() -> dict:
         except Exception:
             return 0
 
-    # All 6 lookups below are independent — run them concurrently instead
+    # All 9 lookups below are independent — run them concurrently instead
     # of one after another.
     (
         total_users,
@@ -130,6 +131,9 @@ def get_business_dashboard() -> dict:
         affiliate_revenue_month,
         open_tasks,
         open_approvals,
+        revenue_summary,
+        cancellations_month,
+        ai_usage_today,
     ) = run_parallel(
         lambda: count_rows(USER_TABLE),
         lambda: count_rows(USER_TABLE, filters={"premium": True}),
@@ -137,18 +141,37 @@ def get_business_dashboard() -> dict:
         lambda: _affiliate_revenue(month_start),
         _open_tasks,
         _open_approvals,
+        stripe_billing.get_revenue_summary,
+        lambda: stripe_billing.get_cancellations_since(month_start),
+        lambda: get_ai_usage_summary(days=1),
     )
     conversion_rate = round(premium_users / total_users, 3) if total_users and premium_users is not None and total_users > 0 else None
 
     return {
         "computed_at": now.isoformat(),
-        "revenue_today": {"value": None, "note": NO_STRIPE_REPORTING_NOTE, "source": "Stripe (nicht verbunden)"},
-        "revenue_month": {"value": None, "note": NO_STRIPE_REPORTING_NOTE, "source": "Stripe (nicht verbunden)"},
+        "revenue_today": {
+            "value": revenue_summary["revenue_today"],
+            "note": None if revenue_summary["revenue_today"] is not None else revenue_summary["note"],
+            "source": "vt_stripe_payments",
+        },
+        "revenue_month": {
+            "value": revenue_summary["revenue_month"],
+            "note": None if revenue_summary["revenue_month"] is not None else revenue_summary["note"],
+            "source": "vt_stripe_payments",
+        },
         "mrr": {"value": None, "note": NO_MRR_NOTE, "source": "vt_users (nicht ausreichend)"},
         "new_premium_subscriptions": {"value": None, "note": NO_PREMIUM_TIMESTAMP_NOTE, "source": "vt_users (nicht ausreichend)"},
-        "cancellations": {"value": None, "note": NO_CANCELLATION_NOTE, "source": "Stripe-Webhook (nicht ausreichend)"},
+        "cancellations": {
+            "value": cancellations_month,
+            "note": None if cancellations_month is not None else NO_CANCELLATION_NOTE,
+            "source": "vt_stripe_subscriptions",
+        },
         "affiliate_revenue_today": {"value": affiliate_revenue_today, "note": None, "source": "vt_affiliate_events"},
-        "ai_cost": {"value": None, "note": NO_COST_NOTE, "source": "OpenAI (nicht verbunden)"},
+        "ai_cost": {
+            "value": ai_usage_today.get("cost_usd"),
+            "note": ai_usage_today.get("cost_note"),
+            "source": "vt_ai_usage_events",
+        },
         "infra_cost": {"value": None, "note": NO_INFRA_COST_NOTE, "source": "Railway/Vercel (nicht verbunden)"},
         "conversion_rate": {"value": conversion_rate, "note": None if conversion_rate is not None else "Keine Nutzer vorhanden.", "source": "vt_users"},
         "open_risks": {"value": None, "note": "Siehe Insights (Kategorie enthält 'risiko')", "source": "vt_founder_business_insights"},

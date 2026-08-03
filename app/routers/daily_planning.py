@@ -38,6 +38,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from ..core.auth import require_email as _require_email_dependency
+from ..core.concurrency import run_parallel
 from ..core.supabase import supabase
 from ..core.validation import MAX_REFLECTION_TEXT, validate_scale_1_to_10, validate_short_text
 from ..services import daily_planning, monthly_progress, twin_maturity, weekly_reflection
@@ -113,13 +114,16 @@ class ReflectionInput(BaseModel):
         return validate_scale_1_to_10(value, field_name="Energie")
 
 
-def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
+def _load_habits_raw(email: str) -> list[dict[str, object]]:
     try:
-        habits_raw = supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
+        return supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
     except Exception:
         return []
+
+
+def _load_habit_entries(email: str) -> list[dict[str, object]]:
     try:
-        habit_entries = (
+        return (
             supabase.table(HABIT_ENTRY_TABLE)
             .select("habit_id,entry_date,completed")
             .eq("email", email)
@@ -128,8 +132,12 @@ def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
             or []
         )
     except Exception:
-        habit_entries = []
+        return []
 
+
+def _combine_habits_with_stats(
+    habits_raw: list[dict[str, object]], habit_entries: list[dict[str, object]], today: date
+) -> list[dict[str, object]]:
     entries_by_habit: dict[str, list[dict[str, object]]] = {}
     for entry in habit_entries:
         entries_by_habit.setdefault(str(entry.get("habit_id")), []).append(entry)
@@ -142,6 +150,10 @@ def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
         )
         habits.append({**habit, **stats})
     return habits
+
+
+def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
+    return _combine_habits_with_stats(_load_habits_raw(email), _load_habit_entries(email), today)
 
 
 def _require_own_action(email: str, action_id: str) -> dict[str, object]:
@@ -210,51 +222,94 @@ async def get_today_plan(authorization: str | None = Header(default=None)):
         return {"plan": plan, "actions": actions}
 
     # Kein Plan für heute -> neu generieren (einmalig pro Tag, siehe
-    # Modul-Docstring).
-    goals = []
-    try:
-        goals = (
-            supabase.table(GOAL_TABLE)
-            .select("*")
-            .eq("email", email)
-            .eq("status", "active")
-            .is_("deleted_at", "null")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        pass
-
-    habits = _load_habits_with_stats(email, today)
-
-    try:
-        recommendations = (
-            supabase.table(RECOMMENDATION_TABLE)
-            .select("*")
-            .eq("email", email)
-            .eq("status", "proposed")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        recommendations = []
-
+    # Modul-Docstring). Alle folgenden Lookups sind unabhängig voneinander
+    # und laufen daher parallel statt nacheinander (früher 6 sequenzielle
+    # Aufrufe vor der eigentlichen Planerstellung).
     yesterday = (today - timedelta(days=1)).isoformat()
-    try:
-        yesterday_plan = (
-            supabase.table(DAILY_PLAN_TABLE).select("id").eq("email", email).eq("local_date", yesterday).limit(1).execute().data
-        )
-    except Exception:
-        yesterday_plan = []
+
+    def _goals() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(GOAL_TABLE)
+                .select("*")
+                .eq("email", email)
+                .eq("status", "active")
+                .is_("deleted_at", "null")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _recommendations() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(RECOMMENDATION_TABLE)
+                .select("*")
+                .eq("email", email)
+                .eq("status", "proposed")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _yesterday_plan_id() -> str | None:
+        try:
+            rows = (
+                supabase.table(DAILY_PLAN_TABLE)
+                .select("id")
+                .eq("email", email)
+                .eq("local_date", yesterday)
+                .limit(1)
+                .execute()
+                .data
+            )
+            return rows[0]["id"] if rows else None
+        except Exception:
+            return None
+
+    def _preferred_time_memories() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(MEMORY_TABLE)
+                .select("normalized_value")
+                .eq("email", email)
+                .eq("memory_type", PREFERRED_TIME_MEMORY_TYPE)
+                .in_("status", ["active", "confirmed"])
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    (
+        goals,
+        habits_raw,
+        habit_entries,
+        recommendations,
+        yesterday_plan_id,
+        preferred_time_memories,
+    ) = run_parallel(
+        _goals,
+        lambda: _load_habits_raw(email),
+        lambda: _load_habit_entries(email),
+        _recommendations,
+        _yesterday_plan_id,
+        _preferred_time_memories,
+    )
+    habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
+
     yesterday_actions: list[dict[str, object]] = []
-    if yesterday_plan:
+    if yesterday_plan_id:
         try:
             yesterday_actions = (
                 supabase.table(DAILY_PLAN_ACTION_TABLE)
                 .select("*")
-                .eq("daily_plan_id", yesterday_plan[0]["id"])
+                .eq("daily_plan_id", yesterday_plan_id)
                 .execute()
                 .data
                 or []
@@ -262,19 +317,6 @@ async def get_today_plan(authorization: str | None = Header(default=None)):
         except Exception:
             yesterday_actions = []
 
-    try:
-        preferred_time_memories = (
-            supabase.table(MEMORY_TABLE)
-            .select("normalized_value")
-            .eq("email", email)
-            .eq("memory_type", PREFERRED_TIME_MEMORY_TYPE)
-            .in_("status", ["active", "confirmed"])
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        preferred_time_memories = []
     preferred_time_habit_ids = {
         str(m["normalized_value"]["habit_id"])
         for m in preferred_time_memories
@@ -303,9 +345,8 @@ async def get_today_plan(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=500, detail="Tagesplan konnte nicht erstellt werden.") from exc
     plan = plan_response.data[0] if plan_response.data else plan_payload
 
-    action_rows: list[dict[str, object]] = []
-    for sort_order, draft in enumerate(drafts):
-        action_payload = {
+    action_payloads: list[dict[str, object]] = [
+        {
             "daily_plan_id": plan.get("id"),
             "email": email,
             "description": draft.description,
@@ -320,12 +361,16 @@ async def get_today_plan(authorization: str | None = Header(default=None)):
             "recommendation_id": draft.recommendation_id,
             "carried_over": draft.carried_over,
         }
+        for sort_order, draft in enumerate(drafts)
+    ]
+    action_rows: list[dict[str, object]] = []
+    if action_payloads:
+        # Single bulk insert instead of one insert() call per action —
+        # PostgREST accepts a list payload and returns all inserted rows.
         try:
-            action_response = supabase.table(DAILY_PLAN_ACTION_TABLE).insert(action_payload).execute()
+            action_rows = supabase.table(DAILY_PLAN_ACTION_TABLE).insert(action_payloads).execute().data or []
         except Exception:
-            continue
-        if action_response.data:
-            action_rows.append(action_response.data[0])
+            action_rows = []
 
     return {"plan": plan, "actions": action_rows}
 
@@ -384,18 +429,37 @@ async def save_reflection(data: ReflectionInput, authorization: str | None = Hea
     today = date.today()
     now = datetime.now(timezone.utc)
 
-    try:
-        today_plan = (
-            supabase.table(DAILY_PLAN_TABLE)
-            .select("id")
-            .eq("email", email)
-            .eq("local_date", today.isoformat())
-            .limit(1)
-            .execute()
-            .data
-        )
-    except Exception:
-        today_plan = []
+    def _today_plan() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(DAILY_PLAN_TABLE)
+                .select("id")
+                .eq("email", email)
+                .eq("local_date", today.isoformat())
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _existing_reflection_ids() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(DAILY_REFLECTION_TABLE)
+                .select("id")
+                .eq("email", email)
+                .eq("local_date", today.isoformat())
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    today_plan, existing_reflection_ids = run_parallel(_today_plan, _existing_reflection_ids)
 
     plan_outcome: dict[str, object] = {}
     daily_plan_id = today_plan[0]["id"] if today_plan else None
@@ -420,15 +484,7 @@ async def save_reflection(data: ReflectionInput, authorization: str | None = Hea
     payload["updated_at"] = now.isoformat()
 
     try:
-        existing = (
-            supabase.table(DAILY_REFLECTION_TABLE)
-            .select("id")
-            .eq("email", email)
-            .eq("local_date", today.isoformat())
-            .limit(1)
-            .execute()
-        )
-        if existing.data:
+        if existing_reflection_ids:
             supabase.table(DAILY_REFLECTION_TABLE).update(payload).eq("email", email).eq(
                 "local_date", today.isoformat()
             ).execute()

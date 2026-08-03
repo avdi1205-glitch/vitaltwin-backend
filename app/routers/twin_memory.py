@@ -39,6 +39,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from ..core.auth import require_email as _require_email_dependency
+from ..core.concurrency import run_parallel
 from ..core.learning_events import record_learning_event
 from ..core.supabase import supabase
 from ..core.validation import MAX_MEMORY_REASON, MAX_SHORT_TEXT, validate_short_text
@@ -562,43 +563,49 @@ async def list_patterns(authorization: str | None = Header(default=None)):
     today = date.today()
     now = datetime.now(timezone.utc)
 
-    try:
-        daily_entries = (
-            supabase.table(DAILY_ENTRY_TABLE)
-            .select("*")
-            .eq("email", email)
-            .order("entry_date", desc=True)
-            .limit(60)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        daily_entries = []
+    def _daily_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(DAILY_ENTRY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .order("entry_date", desc=True)
+                .limit(60)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
 
-    try:
-        habit_entries = (
-            supabase.table(HABIT_ENTRY_TABLE)
-            .select("habit_id,entry_date,completed")
-            .eq("email", email)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        habit_entries = []
+    def _habit_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(HABIT_ENTRY_TABLE)
+                .select("habit_id,entry_date,completed")
+                .eq("email", email)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
 
-    try:
-        recommendation_history = (
-            supabase.table(RECOMMENDATION_TABLE).select("*").eq("email", email).limit(200).execute().data or []
-        )
-    except Exception:
-        recommendation_history = []
+    def _recommendation_history() -> list[dict[str, object]]:
+        try:
+            return supabase.table(RECOMMENDATION_TABLE).select("*").eq("email", email).limit(200).execute().data or []
+        except Exception:
+            return []
 
-    try:
-        existing_patterns = supabase.table(PATTERN_TABLE).select("*").eq("email", email).execute().data or []
-    except Exception:
-        existing_patterns = []
+    def _existing_patterns() -> list[dict[str, object]]:
+        try:
+            return supabase.table(PATTERN_TABLE).select("*").eq("email", email).execute().data or []
+        except Exception:
+            return []
+
+    daily_entries, habit_entries, recommendation_history, existing_patterns = run_parallel(
+        _daily_entries, _habit_entries, _recommendation_history, _existing_patterns
+    )
     existing_by_key = {row.get("pattern_key"): row for row in existing_patterns}
 
     drafts = pattern_detection.generate_patterns(

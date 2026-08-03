@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..core.auth import require_email as _require_email_dependency
 from ..core.ai_usage_logger import log_ai_usage
+from ..core.concurrency import run_parallel
 from ..core.plans import get_chat_daily_limit, get_context_char_limit
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
@@ -150,13 +151,16 @@ def _increment_usage(email: str, row: dict[str, object] | None) -> None:
         pass
 
 
-def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
+def _load_habits_raw(email: str) -> list[dict[str, object]]:
     try:
-        habits_raw = supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
+        return supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
     except Exception:
         return []
+
+
+def _load_habit_entries(email: str) -> list[dict[str, object]]:
     try:
-        habit_entries = (
+        return (
             supabase.table(HABIT_ENTRY_TABLE)
             .select("habit_id,entry_date,completed")
             .eq("email", email)
@@ -165,8 +169,12 @@ def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
             or []
         )
     except Exception:
-        habit_entries = []
+        return []
 
+
+def _combine_habits_with_stats(
+    habits_raw: list[dict[str, object]], habit_entries: list[dict[str, object]], today: date
+) -> list[dict[str, object]]:
     entries_by_habit: dict[str, list[dict[str, object]]] = {}
     for entry in habit_entries:
         entries_by_habit.setdefault(str(entry.get("habit_id")), []).append(entry)
@@ -184,127 +192,171 @@ def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
 def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, str]], bool]:
     """Gathers every raw data piece for this user only (every query scoped
     by `email`), then hands it to the pure `build_twin_context` to shape,
-    redact, and cap it. Returns (context_text, sources, truncated)."""
+    redact, and cap it. Returns (context_text, sources, truncated).
+
+    All independent lookups below run concurrently via `run_parallel`
+    (same pattern as the Founder-OS dashboards) instead of one after
+    another — this used to be ~10-12 sequential Supabase round-trips on
+    every single "Frag deinen Twin" request, the slowest user-facing
+    endpoint in the codebase."""
     today = date.today()
 
-    try:
-        profile_resp = supabase.table(PROFILE_TABLE).select("*").eq("email", email).limit(1).execute()
-        profile = profile_resp.data[0] if profile_resp.data else None
-    except Exception:
-        profile = None
+    def _profile() -> dict[str, object] | None:
+        try:
+            resp = supabase.table(PROFILE_TABLE).select("*").eq("email", email).limit(1).execute()
+            return resp.data[0] if resp.data else None
+        except Exception:
+            return None
 
-    try:
-        goals = (
-            supabase.table(GOAL_TABLE)
-            .select("*")
-            .eq("email", email)
-            .eq("status", "active")
-            .is_("deleted_at", "null")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        goals = []
+    def _goals() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(GOAL_TABLE)
+                .select("*")
+                .eq("email", email)
+                .eq("status", "active")
+                .is_("deleted_at", "null")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
 
-    habits = _load_habits_with_stats(email, today)
+    def _daily_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(DAILY_ENTRY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .order("entry_date", desc=True)
+                .limit(30)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
 
-    try:
-        daily_entries = (
-            supabase.table(DAILY_ENTRY_TABLE)
-            .select("*")
-            .eq("email", email)
-            .order("entry_date", desc=True)
-            .limit(30)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        daily_entries = []
+    def _confirmed_memories() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(MEMORY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .in_("status", ["active", "confirmed"])
+                .is_("deleted_at", "null")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _active_recommendations() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(RECOMMENDATION_TABLE)
+                .select("*")
+                .eq("email", email)
+                .eq("status", "proposed")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _recommendation_history() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(RECOMMENDATION_TABLE)
+                .select("category,status")
+                .eq("email", email)
+                .limit(100)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _confirmed_patterns() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(PATTERN_TABLE)
+                .select("*")
+                .eq("email", email)
+                .eq("status", "active")
+                .eq("contradicting", False)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _today_plan_id() -> str | None:
+        try:
+            rows = (
+                supabase.table(DAILY_PLAN_TABLE)
+                .select("id")
+                .eq("email", email)
+                .eq("local_date", today.isoformat())
+                .limit(1)
+                .execute()
+                .data
+            )
+            return rows[0]["id"] if rows else None
+        except Exception:
+            return None
+
+    (
+        profile,
+        goals,
+        habits_raw,
+        habit_entries,
+        daily_entries,
+        confirmed_memories,
+        active_recommendations,
+        recommendation_history,
+        confirmed_patterns,
+        today_plan_id,
+    ) = run_parallel(
+        _profile,
+        _goals,
+        lambda: _load_habits_raw(email),
+        lambda: _load_habit_entries(email),
+        _daily_entries,
+        _confirmed_memories,
+        _active_recommendations,
+        _recommendation_history,
+        _confirmed_patterns,
+        _today_plan_id,
+    )
+
+    habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
 
     trends: dict[str, dict[str, object]] = {}
     for field_name in TREND_FIELDS:
         result = compute_trend(daily_entries, field=field_name, window_days=7, today=today)
         trends[field_name] = {"average": result.average, "data_quality": result.data_quality}
 
-    try:
-        confirmed_memories = (
-            supabase.table(MEMORY_TABLE)
-            .select("*")
-            .eq("email", email)
-            .in_("status", ["active", "confirmed"])
-            .is_("deleted_at", "null")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        confirmed_memories = []
-
-    try:
-        active_recommendations = (
-            supabase.table(RECOMMENDATION_TABLE)
-            .select("*")
-            .eq("email", email)
-            .eq("status", "proposed")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        active_recommendations = []
-
-    try:
-        recommendation_history = (
-            supabase.table(RECOMMENDATION_TABLE)
-            .select("category,status")
-            .eq("email", email)
-            .limit(100)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        recommendation_history = []
     feedback_summary = personalization.compute_category_penalty(recommendation_history)
 
-    try:
-        confirmed_patterns = (
-            supabase.table(PATTERN_TABLE)
-            .select("*")
-            .eq("email", email)
-            .eq("status", "active")
-            .eq("contradicting", False)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        confirmed_patterns = []
-
     daily_plan_actions: list[dict[str, object]] = []
-    try:
-        today_plan = (
-            supabase.table(DAILY_PLAN_TABLE)
-            .select("id")
-            .eq("email", email)
-            .eq("local_date", today.isoformat())
-            .limit(1)
-            .execute()
-            .data
-        )
-        if today_plan:
+    if today_plan_id:
+        try:
             daily_plan_actions = (
                 supabase.table(DAILY_PLAN_ACTION_TABLE)
                 .select("description,user_adjusted_description")
-                .eq("daily_plan_id", today_plan[0]["id"])
+                .eq("daily_plan_id", today_plan_id)
                 .execute()
                 .data
                 or []
             )
-    except Exception:
-        daily_plan_actions = []
+        except Exception:
+            daily_plan_actions = []
 
     context = build_twin_context(
         profile=profile,

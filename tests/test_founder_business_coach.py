@@ -14,9 +14,11 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from app.core import ai_usage_logger
 from app.core import founder_business_goals as goals_module
 from app.core import founder_business_insight_engine as insight_engine
 from app.core import founder_business_metrics as metrics
+from app.core import stripe_billing
 from app.routers import founder_business_coach as coach_module
 from app.services.ai_provider import AIProviderUnavailableError
 
@@ -96,6 +98,8 @@ def business_supabase(monkeypatch):
     monkeypatch.setattr(metrics, "supabase", fake)
     monkeypatch.setattr(insight_engine, "supabase", fake)
     monkeypatch.setattr(coach_module, "supabase", fake)
+    monkeypatch.setattr(stripe_billing, "supabase", fake)
+    monkeypatch.setattr(ai_usage_logger, "supabase", fake)
     return fake
 
 
@@ -129,10 +133,12 @@ class TestSmallGroupGuard:
 
 
 class TestBusinessDashboard:
-    def test_no_stripe_revenue_is_honestly_none_with_note(self, business_supabase):
+    def test_stripe_revenue_is_real_zero_when_table_reachable_but_empty(self, business_supabase):
+        """vt_stripe_payments is reachable (fake) but has zero rows — an
+        honest real `0.0`, not `None` (None is reserved for unreachable)."""
         result = metrics.get_business_dashboard()
-        assert result["revenue_today"]["value"] is None
-        assert "Stripe" in result["revenue_today"]["note"]
+        assert result["revenue_today"]["value"] == 0.0
+        assert result["revenue_today"]["note"] is None
         assert result["mrr"]["value"] is None
         assert result["ai_cost"]["value"] is None
         assert result["infra_cost"]["value"] is None
