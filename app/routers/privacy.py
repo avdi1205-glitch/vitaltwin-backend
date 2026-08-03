@@ -30,6 +30,7 @@ from pydantic import BaseModel, field_validator
 
 from ..core.audit import record_audit_event
 from ..core.auth import require_email as _require_email_dependency
+from ..core.concurrency import run_parallel
 from ..core.supabase import supabase
 from ..services.privacy_export import resolve_current_consents, rows_to_csv
 
@@ -113,20 +114,27 @@ async def privacy_overview(authorization: str | None = Header(default=None)):
     neue Geschäftslogik."""
     email = _require_email(authorization)
 
-    stored_counts: dict[str, int] = {}
-    for category in CATEGORY_TABLES:
-        stored_counts[category] = len(_load_category_rows(email, category))
+    categories = list(CATEGORY_TABLES)
 
-    memories = _load_category_rows(email, "memories")
+    def _consent_rows() -> list[dict[str, object]]:
+        try:
+            return supabase.table(CONSENT_TABLE).select("*").eq("email", email).execute().data or []
+        except Exception:
+            return []
+
+    *category_rows_list, consent_rows = run_parallel(
+        *(lambda category=category: _load_category_rows(email, category) for category in categories),
+        _consent_rows,
+    )
+    rows_by_category = dict(zip(categories, category_rows_list))
+    stored_counts = {category: len(rows) for category, rows in rows_by_category.items()}
+
+    memories = rows_by_category["memories"]
     active_memories = [m for m in memories if m.get("status") in ("active", "confirmed") and not m.get("deleted_at")]
 
-    patterns = _load_category_rows(email, "patterns")
+    patterns = rows_by_category["patterns"]
     active_patterns = [p for p in patterns if p.get("status") == "active" and not p.get("contradicting")]
 
-    try:
-        consent_rows = supabase.table(CONSENT_TABLE).select("*").eq("email", email).execute().data or []
-    except Exception:
-        consent_rows = []
     resolved_consents = resolve_current_consents(consent_rows)
     consents = {
         consent_type: resolved_consents.get(consent_type, {"granted": None, "changed_at": None})

@@ -43,6 +43,7 @@ from ..core.admin_rbac import require_admin_permission
 from ..core.affiliate_import_export import export_products, import_products
 from ..core.affiliate_link_checker import check_link
 from ..core.audit import record_audit_event
+from ..core.concurrency import run_parallel
 from ..core.supabase import supabase
 
 router = APIRouter()
@@ -192,14 +193,20 @@ class SettingsInput(BaseModel):
 @router.get("/dashboard")
 async def affiliate_dashboard(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_affiliate")
-    try:
-        products = supabase.table(PRODUCT_TABLE).select("id,status,link_status").execute().data or []
-    except Exception:
-        products = []
-    try:
-        partners = supabase.table(PARTNER_TABLE).select("id,status").execute().data or []
-    except Exception:
-        partners = []
+
+    def _products() -> list[dict[str, object]]:
+        try:
+            return supabase.table(PRODUCT_TABLE).select("id,status,link_status").execute().data or []
+        except Exception:
+            return []
+
+    def _partners() -> list[dict[str, object]]:
+        try:
+            return supabase.table(PARTNER_TABLE).select("id,status").execute().data or []
+        except Exception:
+            return []
+
+    products, partners = run_parallel(_products, _partners)
 
     status_counts: dict[str, int] = {}
     for product in products:
@@ -515,18 +522,25 @@ async def list_ab_tests(authorization: str | None = Header(default=None)):
     except Exception:
         tests = []
 
-    for test in tests:
+    test_ids = [test["id"] for test in tests if test.get("id") is not None]
+    events_by_test: dict[str, list[dict[str, object]]] = {}
+    if test_ids:
         try:
-            events = (
+            all_events = (
                 supabase.table(EVENT_TABLE)
-                .select("product_id,event_type,revenue")
-                .eq("ab_test_id", test["id"])
+                .select("ab_test_id,product_id,event_type,revenue")
+                .in_("ab_test_id", test_ids)
                 .execute()
                 .data
                 or []
             )
         except Exception:
-            events = []
+            all_events = []
+        for event in all_events:
+            events_by_test.setdefault(str(event.get("ab_test_id")), []).append(event)
+
+    for test in tests:
+        events = events_by_test.get(str(test.get("id")), [])
         for variant_key, product_id in (("a", test.get("product_a_id")), ("b", test.get("product_b_id"))):
             variant_events = [e for e in events if str(e.get("product_id")) == str(product_id)]
             test[f"impressions_{variant_key}"] = sum(1 for e in variant_events if e["event_type"] == "impression")
@@ -612,14 +626,20 @@ async def list_events(
 @router.get("/analytics")
 async def affiliate_analytics(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_affiliate")
-    try:
-        events = supabase.table(EVENT_TABLE).select("*").execute().data or []
-    except Exception:
-        events = []
-    try:
-        products = supabase.table(PRODUCT_TABLE).select("id,title,category_id,partner_id").execute().data or []
-    except Exception:
-        products = []
+
+    def _events() -> list[dict[str, object]]:
+        try:
+            return supabase.table(EVENT_TABLE).select("*").execute().data or []
+        except Exception:
+            return []
+
+    def _products() -> list[dict[str, object]]:
+        try:
+            return supabase.table(PRODUCT_TABLE).select("id,title,category_id,partner_id").execute().data or []
+        except Exception:
+            return []
+
+    events, products = run_parallel(_events, _products)
     product_by_id = {str(p["id"]): p for p in products}
 
     per_product: dict[str, dict] = {}

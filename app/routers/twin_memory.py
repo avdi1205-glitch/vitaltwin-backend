@@ -181,13 +181,16 @@ def _creation_event_type(memory_type: str) -> str:
     return "memory_erstellt"
 
 
-def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
+def _load_habits_raw(email: str) -> list[dict[str, object]]:
     try:
-        habits_raw = supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
+        return supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
     except Exception:
         return []
+
+
+def _load_habit_entries(email: str) -> list[dict[str, object]]:
     try:
-        habit_entries = (
+        return (
             supabase.table(HABIT_ENTRY_TABLE)
             .select("habit_id,entry_date,completed")
             .eq("email", email)
@@ -196,8 +199,12 @@ def _load_habits_with_stats(email: str, today: date) -> list[dict[str, object]]:
             or []
         )
     except Exception:
-        habit_entries = []
+        return []
 
+
+def _combine_habits_with_stats(
+    habits_raw: list[dict[str, object]], habit_entries: list[dict[str, object]], today: date
+) -> list[dict[str, object]]:
     entries_by_habit: dict[str, list[dict[str, object]]] = {}
     for entry in habit_entries:
         entries_by_habit.setdefault(str(entry.get("habit_id")), []).append(entry)
@@ -218,49 +225,56 @@ async def list_memories(authorization: str | None = Header(default=None)):
     today = date.today()
     now = datetime.now(timezone.utc)
 
-    try:
-        goals = (
-            supabase.table(GOAL_TABLE)
-            .select("*")
-            .eq("email", email)
-            .eq("status", "active")
-            .is_("deleted_at", "null")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        goals = []
+    def _goals() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(GOAL_TABLE)
+                .select("*")
+                .eq("email", email)
+                .eq("status", "active")
+                .is_("deleted_at", "null")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
 
-    habits = _load_habits_with_stats(email, today)
+    def _recommendation_history() -> list[dict[str, object]]:
+        try:
+            return supabase.table(RECOMMENDATION_TABLE).select("*").eq("email", email).limit(200).execute().data or []
+        except Exception:
+            return []
 
-    try:
-        recommendation_history = (
-            supabase.table(RECOMMENDATION_TABLE).select("*").eq("email", email).limit(200).execute().data or []
-        )
-    except Exception:
-        recommendation_history = []
+    def _confirmed_patterns() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(PATTERN_TABLE)
+                .select("*")
+                .eq("email", email)
+                .eq("status", "active")
+                .eq("contradicting", False)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
 
-    try:
-        confirmed_patterns = (
-            supabase.table(PATTERN_TABLE)
-            .select("*")
-            .eq("email", email)
-            .eq("status", "active")
-            .eq("contradicting", False)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        confirmed_patterns = []
+    def _existing_memories() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(MEMORY_TABLE).select("*").eq("email", email).is_("deleted_at", "null").execute().data
+                or []
+            )
+        except Exception:
+            return []
 
-    try:
-        existing_memories = (
-            supabase.table(MEMORY_TABLE).select("*").eq("email", email).is_("deleted_at", "null").execute().data or []
-        )
-    except Exception:
-        existing_memories = []
+    goals, habits_raw, habit_entries, recommendation_history, confirmed_patterns, existing_memories = run_parallel(
+        _goals, lambda: _load_habits_raw(email), lambda: _load_habit_entries(email),
+        _recommendation_history, _confirmed_patterns, _existing_memories,
+    )
+    habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
     existing_by_key = {row.get("memory_key"): row for row in existing_memories}
 
     candidates = twin_memory.generate_memory_candidates(
