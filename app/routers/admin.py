@@ -59,6 +59,7 @@ ADMIN_ROLE_TABLE = "vt_admin_roles"
 LOGIN_EVENT_TABLE = "vt_login_events"
 CONTENT_TABLE = "vt_content_items"
 FEEDBACK_TABLE = "vt_user_feedback"
+CONTACT_TABLE = "vt_contact_messages"
 CONSENT_TABLE = "vt_consent_records"
 AUDIT_TABLE = "vt_audit_events"
 DAILY_ENTRY_TABLE = "vt_daily_wellness_entries"
@@ -769,6 +770,94 @@ async def list_feedback(
             "Feedback, Bug Reports und Feature Requests laufen aktuell über ein gemeinsames Formular "
             "(`vt_user_feedback`) ohne separate Kategorisierung."
         ),
+    }
+
+
+ALLOWED_CONTACT_STATUSES = {"new", "beantwortet", "archiviert"}
+
+
+class ContactStatusInput(BaseModel):
+    status: str
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        if value not in ALLOWED_CONTACT_STATUSES:
+            raise ValueError(f"Ungültiger Status. Erlaubt: {', '.join(sorted(ALLOWED_CONTACT_STATUSES))}")
+        return value
+
+
+@router.get("/support/contacts")
+async def list_contact_messages(
+    status: str = "", page: int = 1, page_size: int = DEFAULT_PAGE_SIZE, authorization: str | None = Header(default=None)
+):
+    """Previously nothing surfaced submissions from `/kontakt`
+    (`routers/contact.py::send_contact_message`) except a best-effort SMTP
+    notification email (silently a no-op if SMTP isn't configured) — this
+    gives admins a reliable, always-available way to see them."""
+    require_admin_permission(authorization, "view_support")
+    start, end = _paginate(page, page_size)
+    try:
+        query = supabase.table(CONTACT_TABLE).select("*", count="exact")
+        if status.strip():
+            query = query.eq("status", status.strip())
+        response = query.order("created_at", desc=True).range(start, end).execute()
+        items = response.data or []
+        total = response.count or 0
+    except Exception:
+        items = []
+        total = 0
+    return {"items": items, "page": page, "page_size": page_size, "total": total}
+
+
+@router.patch("/support/contacts/{message_id}/status")
+async def update_contact_message_status(
+    message_id: str, data: ContactStatusInput, authorization: str | None = Header(default=None)
+):
+    admin = require_admin_permission(authorization, "manage_support")
+    try:
+        supabase.table(CONTACT_TABLE).update({"status": data.status}).eq("id", message_id).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Status konnte nicht aktualisiert werden.") from exc
+
+    record_audit_event(
+        user_id=None, email=admin.email, action="update", entity_type="contact_message", entity_id=message_id,
+        metadata={"status": data.status},
+    )
+    return {"message": "Status aktualisiert.", "id": message_id, "status": data.status}
+
+
+@router.get("/support/beta-applications")
+async def list_beta_applications(
+    page: int = 1, page_size: int = DEFAULT_PAGE_SIZE, authorization: str | None = Header(default=None)
+):
+    """Previously only a total COUNT was shown on the dashboard
+    (`beta_applications_total`) — admins had no way to see WHO applied or
+    read their motivation, only a raw DB query could. Read-only: there is
+    no separate approval/activation status column for beta testers (see
+    `beta_applications_note` on `/dashboard`), so this deliberately does not
+    fabricate an approve/reject workflow that doesn't exist."""
+    require_admin_permission(authorization, "view_support")
+    start, end = _paginate(page, page_size)
+    try:
+        response = (
+            supabase.table(BETA_APPLICATION_TABLE)
+            .select("*", count="exact")
+            .order("created_at", desc=True)
+            .range(start, end)
+            .execute()
+        )
+        items = response.data or []
+        total = response.count or 0
+    except Exception:
+        items = []
+        total = 0
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "note": "Aktuell keine separate Freigabe-/Aktivierungsstatus-Spalte — Beta-Zugang wird manuell per Premium-Flag vergeben.",
     }
 
 

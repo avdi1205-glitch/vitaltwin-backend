@@ -228,6 +228,25 @@ class TestPermissionRequirements:
         assert permission_spy[-1] == ("Bearer x", "view_support")
 
     @pytest.mark.anyio
+    async def test_list_contacts_requires_view_support(self, fake_supabase, permission_spy):
+        await admin_module.list_contact_messages(authorization="Bearer x")
+        assert permission_spy[-1] == ("Bearer x", "view_support")
+
+    @pytest.mark.anyio
+    async def test_update_contact_status_requires_manage_support(self, fake_supabase, permission_spy, recorded_audit_events):
+        from app.routers.admin import ContactStatusInput
+
+        await admin_module.update_contact_message_status(
+            "msg-1", ContactStatusInput(status="beantwortet"), authorization="Bearer x"
+        )
+        assert permission_spy[-1] == ("Bearer x", "manage_support")
+
+    @pytest.mark.anyio
+    async def test_list_beta_applications_requires_view_support(self, fake_supabase, permission_spy):
+        await admin_module.list_beta_applications(authorization="Bearer x")
+        assert permission_spy[-1] == ("Bearer x", "view_support")
+
+    @pytest.mark.anyio
     async def test_analytics_requires_view_analytics(self, fake_supabase, permission_spy):
         await admin_module.analytics_growth(authorization="Bearer x")
         assert permission_spy[-1] == ("Bearer x", "view_analytics")
@@ -444,6 +463,59 @@ class TestSecurityCenter:
         result = await admin_module.get_permission_matrix(authorization="Bearer x")
         assert set(result["roles"].keys()) == set(ROLE_PERMISSIONS.keys())
         assert result["roles"]["editor"] == sorted(ROLE_PERMISSIONS["editor"])
+
+
+class TestSupportContactsAndBetaApplications:
+    @pytest.mark.anyio
+    async def test_list_contacts_returns_items(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_contact_messages"] = {
+            "data": [{"id": "m1", "full_name": "A", "email": "a@example.com", "status": "new"}],
+            "count": 1,
+        }
+        result = await admin_module.list_contact_messages(authorization="Bearer x")
+        assert result["items"][0]["id"] == "m1"
+        assert result["total"] == 1
+
+    @pytest.mark.anyio
+    async def test_list_contacts_filters_by_status(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_contact_messages"] = {"data": [], "count": 0}
+        await admin_module.list_contact_messages(status="beantwortet", authorization="Bearer x")
+        assert ("vt_contact_messages", "eq", ("status", "beantwortet"), {}) in fake_supabase.log
+
+    @pytest.mark.anyio
+    async def test_update_contact_status_updates_row_and_records_audit_event(
+        self, fake_supabase, permission_spy, recorded_audit_events
+    ):
+        from app.routers.admin import ContactStatusInput
+
+        result = await admin_module.update_contact_message_status(
+            "msg-1", ContactStatusInput(status="archiviert"), authorization="Bearer x"
+        )
+        assert result["status"] == "archiviert"
+        updated = fake_supabase.store["vt_contact_messages"]["updated"][-1]
+        assert updated["status"] == "archiviert"
+        assert recorded_audit_events[-1]["entity_type"] == "contact_message"
+        assert recorded_audit_events[-1]["entity_id"] == "msg-1"
+
+    @pytest.mark.anyio
+    async def test_update_contact_status_rejects_invalid_status(self):
+        from pydantic import ValidationError
+
+        from app.routers.admin import ContactStatusInput
+
+        with pytest.raises(ValidationError):
+            ContactStatusInput(status="unbekannt")
+
+    @pytest.mark.anyio
+    async def test_list_beta_applications_returns_items_and_honest_note(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_beta_applications"] = {
+            "data": [{"email": "beta@example.com", "full_name": "Beta Tester", "motivation": "Test"}],
+            "count": 1,
+        }
+        result = await admin_module.list_beta_applications(authorization="Bearer x")
+        assert result["items"][0]["email"] == "beta@example.com"
+        assert result["total"] == 1
+        assert "note" in result
 
 
 # ---------------------------------------------------------------------------
