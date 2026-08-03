@@ -27,6 +27,7 @@ see `docs/ADMIN_ARCHITECTURE.md` for the full rationale per section.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import date, datetime, timedelta, timezone
 
@@ -195,41 +196,90 @@ async def admin_dashboard(authorization: str | None = Header(default=None)):
     week_ago = (today - timedelta(days=7)).isoformat()
     month_ago = (today - timedelta(days=30)).isoformat()
 
-    total_users = _count_rows(USER_TABLE)
-    premium_users = _count_rows(USER_TABLE, filters={"premium": True})
-    suspended_users = _count_rows(USER_TABLE, filters={"suspended": True})
+    def _total_users() -> int | None:
+        return _count_rows(USER_TABLE)
 
-    try:
-        registrations_7d = supabase.table(USER_TABLE).select("email", count="exact").gte("created_at", week_ago).execute().count
-    except Exception:
-        registrations_7d = None
-    try:
-        registrations_30d = supabase.table(USER_TABLE).select("email", count="exact").gte("created_at", month_ago).execute().count
-    except Exception:
-        registrations_30d = None
+    def _premium_users() -> int | None:
+        return _count_rows(USER_TABLE, filters={"premium": True})
 
-    try:
-        active_rows = supabase.table(DAILY_ENTRY_TABLE).select("email").gte("entry_date", week_ago).execute().data or []
-        active_users_7d: int | None = len({row["email"] for row in active_rows if row.get("email")})
-    except Exception:
-        active_users_7d = None
+    def _suspended_users() -> int | None:
+        return _count_rows(USER_TABLE, filters={"suspended": True})
 
-    open_feedback_count = _count_rows(FEEDBACK_TABLE)
-    beta_applications_total = _count_rows(BETA_APPLICATION_TABLE)
+    def _registrations_7d() -> int | None:
+        try:
+            return supabase.table(USER_TABLE).select("email", count="exact").gte("created_at", week_ago).execute().count
+        except Exception:
+            return None
 
-    try:
-        usage_rows = supabase.table(CHAT_USAGE_TABLE).select("count").eq("usage_date", today.isoformat()).execute().data or []
-        ai_requests_today: int | None = sum(int(row.get("count", 0)) for row in usage_rows)
-    except Exception:
-        ai_requests_today = None
+    def _registrations_30d() -> int | None:
+        try:
+            return supabase.table(USER_TABLE).select("email", count="exact").gte("created_at", month_ago).execute().count
+        except Exception:
+            return None
 
-    try:
-        latest_audit = (
-            supabase.table(AUDIT_TABLE).select("action,entity_type,email,created_at").order("created_at", desc=True).limit(1).execute().data or []
-        )
-        latest_activity = latest_audit[0] if latest_audit else None
-    except Exception:
-        latest_activity = None
+    def _active_users_7d() -> int | None:
+        try:
+            active_rows = supabase.table(DAILY_ENTRY_TABLE).select("email").gte("entry_date", week_ago).execute().data or []
+            return len({row["email"] for row in active_rows if row.get("email")})
+        except Exception:
+            return None
+
+    def _open_feedback_count() -> int | None:
+        return _count_rows(FEEDBACK_TABLE)
+
+    def _beta_applications_total() -> int | None:
+        return _count_rows(BETA_APPLICATION_TABLE)
+
+    def _ai_requests_today() -> int | None:
+        try:
+            usage_rows = supabase.table(CHAT_USAGE_TABLE).select("count").eq("usage_date", today.isoformat()).execute().data or []
+            return sum(int(row.get("count", 0)) for row in usage_rows)
+        except Exception:
+            return None
+
+    def _latest_activity() -> dict[str, object] | None:
+        try:
+            latest_audit = (
+                supabase.table(AUDIT_TABLE).select("action,entity_type,email,created_at").order("created_at", desc=True).limit(1).execute().data or []
+            )
+            return latest_audit[0] if latest_audit else None
+        except Exception:
+            return None
+
+    def _revenue_summary() -> dict:
+        return stripe_billing.get_revenue_summary()
+
+    def _error_summary() -> dict:
+        return get_error_summary(days=7)
+
+    (
+        total_users,
+        premium_users,
+        suspended_users,
+        registrations_7d,
+        registrations_30d,
+        active_users_7d,
+        open_feedback_count,
+        beta_applications_total,
+        ai_requests_today,
+        latest_activity,
+        revenue_summary,
+        error_summary,
+    ) = await asyncio.to_thread(
+        run_parallel,
+        _total_users,
+        _premium_users,
+        _suspended_users,
+        _registrations_7d,
+        _registrations_30d,
+        _active_users_7d,
+        _open_feedback_count,
+        _beta_applications_total,
+        _ai_requests_today,
+        _latest_activity,
+        _revenue_summary,
+        _error_summary,
+    )
 
     return {
         "user_count": total_users,
@@ -246,8 +296,16 @@ async def admin_dashboard(authorization: str | None = Header(default=None)):
         "stripe_configured": bool(os.getenv("STRIPE_SECRET_KEY", "").strip()),
         "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
         "supabase_reachable": total_users is not None,
-        "revenue_note": "Umsatzzahlen erfordern eine Stripe-Reporting-API-Anbindung — nicht implementiert.",
-        "error_tracking_note": "Kein Error-Tracking-System (z. B. Sentry) integriert — Fehleranzahl nicht verfügbar.",
+        "revenue_today": revenue_summary["revenue_today"],
+        "revenue_month": revenue_summary["revenue_month"],
+        "revenue_note": revenue_summary["note"],
+        "error_count_7d": error_summary["total"],
+        "error_tracking_note": (
+            "Fehler werden intern geloggt (vt_error_events) und zusätzlich an Sentry gesendet, sofern "
+            "SENTRY_DSN konfiguriert ist."
+            if error_summary["total"] is not None
+            else error_summary["note"]
+        ),
         "system_messages": [],
     }
 

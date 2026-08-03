@@ -140,3 +140,101 @@ class TestRequestDeletionAuditEvent:
         await profile_module.request_deletion(authorization="Bearer x")
         assert recorded[0]["action"] == "deletion_request"
         assert recorded[0]["entity_type"] == "account"
+
+
+class _PerTableQuery:
+    """Per-table-aware fake supporting the subset of the query builder
+    `export_profile`'s recommendation-child-table fix and `update_profile`'s
+    upsert consolidation need (`.in_()`, `.upsert()`) — the shared
+    `_RecordingQuery` above doesn't implement either."""
+
+    def __init__(self, table_name: str, tables: dict[str, list[dict]], upserts: list[dict]):
+        self._table_name = table_name
+        self._tables = tables
+        self._upserts = upserts
+        self._filters: list[tuple[str, object]] = []
+        self._payload: dict | None = None
+        self._op: str | None = None
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, field, value):
+        self._filters.append((field, value))
+        return self
+
+    def in_(self, field, values):
+        self._filters.append((field, set(values)))
+        return self
+
+    def limit(self, *_a, **_k):
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def upsert(self, payload, on_conflict=None):
+        self._op = "upsert"
+        self._payload = dict(payload)
+        return self
+
+    def execute(self):
+        if self._op == "upsert":
+            self._upserts.append(self._payload)
+            return SimpleNamespace(data=[self._payload])
+        rows = self._tables.get(self._table_name, [])
+        for field, value in self._filters:
+            if isinstance(value, set):
+                rows = [r for r in rows if r.get(field) in value]
+            else:
+                rows = [r for r in rows if r.get(field) == value]
+        return SimpleNamespace(data=rows)
+
+
+class _PerTableSupabase:
+    def __init__(self, tables: dict[str, list[dict]]):
+        self.tables = tables
+        self.upserts: list[dict] = []
+
+    def table(self, name):
+        return _PerTableQuery(name, self.tables, self.upserts)
+
+
+class TestExportProfileRecommendationChildTables:
+    @pytest.mark.anyio
+    async def test_recommendation_children_populated_via_recommendation_id(self, monkeypatch):
+        """Regression test for the bug found during the 2026-08 performance
+        pass: these 3 tables have no `email` column, so filtering them by
+        email always silently returned []. Filtering by the user's own
+        recommendation ids must return the real rows instead."""
+        fake = _PerTableSupabase(
+            {
+                "vt_recommendations": [{"id": "rec-1", "email": "user-a@example.com"}],
+                "vt_recommendation_decisions": [{"id": "d1", "recommendation_id": "rec-1", "decision": "accepted"}],
+                "vt_recommendation_outcomes": [{"id": "o1", "recommendation_id": "rec-1", "outcome_status": "improved"}],
+                "vt_recommendation_feedback": [{"id": "f1", "recommendation_id": "rec-1", "rating": 5}],
+            }
+        )
+        monkeypatch.setattr(profile_module, "supabase", fake)
+        monkeypatch.setattr(profile_module, "_require_email", lambda auth: "user-a@example.com")
+        monkeypatch.setattr(profile_module, "record_audit_event", lambda **kwargs: None)
+
+        result = await profile_module.export_profile(authorization="Bearer x")
+        assert result["recommendation_decisions"] == [{"id": "d1", "recommendation_id": "rec-1", "decision": "accepted"}]
+        assert result["recommendation_outcomes"][0]["outcome_status"] == "improved"
+        assert result["recommendation_feedback"][0]["rating"] == 5
+
+
+class TestUpdateProfileUpsert:
+    @pytest.mark.anyio
+    async def test_single_upsert_call_used(self, monkeypatch):
+        fake = _PerTableSupabase({})
+        monkeypatch.setattr(profile_module, "supabase", fake)
+        monkeypatch.setattr(profile_module, "_require_email", lambda auth: "user-a@example.com")
+
+        data = profile_module.ProfileUpdate(display_name="Test")
+        result = await profile_module.update_profile(data, authorization="Bearer x")
+
+        assert len(fake.upserts) == 1
+        assert fake.upserts[0]["email"] == "user-a@example.com"
+        assert result["display_name"] == "Test"

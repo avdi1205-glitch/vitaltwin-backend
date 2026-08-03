@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..core.supabase import supabase
 from ..core.auth import require_email as _require_email_dependency
 from ..core.audit import record_audit_event
+from ..core.concurrency import run_parallel
 from ..core.learning_events import record_learning_event
 from ..core.validation import (
     MAX_SYNC_EXPORT_ROWS,
@@ -388,15 +389,15 @@ async def update_profile(data: ProfileUpdate, authorization: str | None = Header
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
-        existing = _get_profile_row(email)
-        if existing:
-            supabase.table(PROFILE_TABLE).update(payload).eq("email", email).execute()
-        else:
-            supabase.table(PROFILE_TABLE).insert(payload).execute()
+        # Single upsert instead of read-then-insert-or-update — `email` has a
+        # unique constraint (migration 001), so PostgREST can decide
+        # insert-vs-update itself and return the resulting row directly,
+        # cutting this endpoint from 3 sequential round-trips to 1.
+        result = supabase.table(PROFILE_TABLE).upsert(payload, on_conflict="email").execute()
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Profil konnte nicht gespeichert werden.") from exc
 
-    return _get_profile_row(email) or payload
+    return result.data[0] if result.data else payload
 
 
 @router.post("/request-deletion")
@@ -425,11 +426,24 @@ async def request_deletion(authorization: str | None = Header(default=None)):
 async def export_profile(authorization: str | None = Header(default=None)):
     """Etappe 9 §1: vollständiger Datenexport — jede in der Constitution/
     den Etappen 2-7 gespeicherte Kategorie, ausschließlich für den
-    anfragenden Nutzer (jede Abfrage `.eq("email", email)`), niemals Daten
-    anderer Nutzer. Oberhalb von `MAX_SYNC_EXPORT_ROWS` wird der Export
-    abgelehnt statt eine sehr große Antwort zu erzwingen — siehe
-    `services/privacy_export.py` und `docs/TWIN_BETA_LIMITATIONS.md`
-    ("für spätere Background Jobs vorbereiten")."""
+    anfragenden Nutzer (jede Abfrage `.eq("email", email)` bzw. für die
+    Empfehlungs-Kindtabellen über die eigenen `recommendation_id`s — siehe
+    unten), niemals Daten anderer Nutzer. Oberhalb von `MAX_SYNC_EXPORT_ROWS`
+    wird der Export abgelehnt statt eine sehr große Antwort zu erzwingen —
+    siehe `services/privacy_export.py` und `docs/TWIN_BETA_LIMITATIONS.md`
+    ("für spätere Background Jobs vorbereiten").
+
+    All independent per-table lookups run concurrently via `run_parallel`
+    (same pattern as the Founder-OS dashboards) instead of one after
+    another — this endpoint used to make 17 sequential round-trips.
+    `vt_recommendation_decisions`/`_outcomes`/`_feedback` have NO `email`
+    column at all (only `recommendation_id`/`user_id`) — a prior version of
+    this endpoint filtered them with `.eq("email", ...)` anyway, which
+    PostgREST rejects, silently caught by the broad `except Exception`
+    below and always returning an empty list for these 3 categories
+    regardless of real data. Fixed here by filtering on the recommendation
+    ids already loaded for this user instead (correct for every row, not
+    just ones where `user_id` happens to be backfilled)."""
     email = _require_email(authorization)
 
     def _load(table: str) -> list[dict[str, object]]:
@@ -438,25 +452,72 @@ async def export_profile(authorization: str | None = Header(default=None)):
         except Exception:
             return []
 
-    profile = _get_profile_row(email) or {}
+    (
+        profile,
+        daily_wellness_entries,
+        habits,
+        habit_entries,
+        goals,
+        daily_plans,
+        daily_plan_actions,
+        daily_reflections,
+        weekly_reflections,
+        recommendations,
+        twin_memories,
+        twin_patterns,
+        twin_learning_events,
+        consents,
+    ) = run_parallel(
+        lambda: _get_profile_row(email) or {},
+        lambda: _load(DAILY_ENTRY_TABLE),
+        lambda: _load(HABIT_TABLE),
+        lambda: _load(HABIT_ENTRY_TABLE),
+        lambda: _load(GOAL_TABLE),
+        lambda: _load(DAILY_PLAN_TABLE),
+        lambda: _load(DAILY_PLAN_ACTION_TABLE),
+        lambda: _load(DAILY_REFLECTION_TABLE),
+        lambda: _load(WEEKLY_REFLECTION_TABLE),
+        lambda: _load(RECOMMENDATION_TABLE),
+        lambda: _load(MEMORY_TABLE),
+        lambda: _load(PATTERN_TABLE),
+        lambda: _load(LEARNING_EVENT_TABLE),
+        lambda: _load(CONSENT_TABLE),
+    )
+
+    recommendation_ids = [r["id"] for r in recommendations if r.get("id")]
+
+    def _load_by_recommendation_ids(table: str) -> list[dict[str, object]]:
+        if not recommendation_ids:
+            return []
+        try:
+            return supabase.table(table).select("*").in_("recommendation_id", recommendation_ids).execute().data or []
+        except Exception:
+            return []
+
+    recommendation_decisions, recommendation_outcomes, recommendation_feedback = run_parallel(
+        lambda: _load_by_recommendation_ids(RECOMMENDATION_DECISION_TABLE),
+        lambda: _load_by_recommendation_ids(RECOMMENDATION_OUTCOME_TABLE),
+        lambda: _load_by_recommendation_ids(RECOMMENDATION_FEEDBACK_TABLE),
+    )
+
     bundle = {
         "profile": profile,
-        "daily_wellness_entries": _load(DAILY_ENTRY_TABLE),
-        "habits": _load(HABIT_TABLE),
-        "habit_entries": _load(HABIT_ENTRY_TABLE),
-        "goals": _load(GOAL_TABLE),
-        "daily_plans": _load(DAILY_PLAN_TABLE),
-        "daily_plan_actions": _load(DAILY_PLAN_ACTION_TABLE),
-        "daily_reflections": _load(DAILY_REFLECTION_TABLE),
-        "weekly_reflections": _load(WEEKLY_REFLECTION_TABLE),
-        "recommendations": _load(RECOMMENDATION_TABLE),
-        "recommendation_decisions": _load(RECOMMENDATION_DECISION_TABLE),
-        "recommendation_outcomes": _load(RECOMMENDATION_OUTCOME_TABLE),
-        "recommendation_feedback": _load(RECOMMENDATION_FEEDBACK_TABLE),
-        "twin_memories": _load(MEMORY_TABLE),
-        "twin_patterns": _load(PATTERN_TABLE),
-        "twin_learning_events": _load(LEARNING_EVENT_TABLE),
-        "consents": _load(CONSENT_TABLE),
+        "daily_wellness_entries": daily_wellness_entries,
+        "habits": habits,
+        "habit_entries": habit_entries,
+        "goals": goals,
+        "daily_plans": daily_plans,
+        "daily_plan_actions": daily_plan_actions,
+        "daily_reflections": daily_reflections,
+        "weekly_reflections": weekly_reflections,
+        "recommendations": recommendations,
+        "recommendation_decisions": recommendation_decisions,
+        "recommendation_outcomes": recommendation_outcomes,
+        "recommendation_feedback": recommendation_feedback,
+        "twin_memories": twin_memories,
+        "twin_patterns": twin_patterns,
+        "twin_learning_events": twin_learning_events,
+        "consents": consents,
     }
 
     total_rows = count_total_export_rows(bundle)

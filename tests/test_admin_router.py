@@ -182,7 +182,7 @@ class TestGetCurrentAdmin:
 
 class TestPermissionRequirements:
     @pytest.mark.anyio
-    async def test_dashboard_requires_view_dashboard(self, fake_supabase, permission_spy):
+    async def test_dashboard_requires_view_dashboard(self, fake_supabase, fake_internal_logging_supabase, permission_spy):
         await admin_module.admin_dashboard(authorization="Bearer x")
         assert permission_spy[-1] == ("Bearer x", "view_dashboard")
 
@@ -482,7 +482,7 @@ class TestHonestyNotes:
         assert result["nutrition"]["last_entries"][0]["meal_name"] == "Haferflocken"
 
     @pytest.mark.anyio
-    async def test_dashboard_reports_revenue_and_error_tracking_notes(self, fake_supabase, permission_spy):
+    async def test_dashboard_reports_revenue_and_error_tracking_notes(self, fake_supabase, fake_internal_logging_supabase, permission_spy):
         result = await admin_module.admin_dashboard(authorization="Bearer x")
         assert "revenue_note" in result
         assert "error_tracking_note" in result
