@@ -854,10 +854,25 @@ async def analytics_growth(authorization: str | None = Header(default=None)):
     today = date.today()
     now = datetime.now(timezone.utc)
 
-    try:
-        all_users = supabase.table(USER_TABLE).select("email,created_at,premium").execute().data or []
-    except Exception:
-        all_users = []
+    def _all_users() -> list[dict]:
+        try:
+            return supabase.table(USER_TABLE).select("email,created_at,premium").execute().data or []
+        except Exception:
+            return []
+
+    def _checkin_rows() -> list[dict]:
+        try:
+            return supabase.table(DAILY_ENTRY_TABLE).select("email,entry_date").execute().data or []
+        except Exception:
+            return []
+
+    def _calc_rows() -> list[dict]:
+        try:
+            return supabase.table(TWIN_CALC_TABLE).select("email,created_at").execute().data or []
+        except Exception:
+            return []
+
+    all_users, checkin_rows, calc_rows = await asyncio.to_thread(run_parallel, _all_users, _checkin_rows, _calc_rows)
 
     registrations_by_day: dict[str, int] = {}
     premium_count = 0
@@ -869,19 +884,9 @@ async def analytics_growth(authorization: str | None = Header(default=None)):
             day = str(created)[:10]
             registrations_by_day[day] = registrations_by_day.get(day, 0) + 1
 
-    try:
-        checkin_rows = supabase.table(DAILY_ENTRY_TABLE).select("email,entry_date").execute().data or []
-    except Exception:
-        checkin_rows = []
-
     dau_today = len({row["email"] for row in checkin_rows if row.get("entry_date") == today.isoformat()})
     month_start = (today - timedelta(days=30)).isoformat()
     mau_30d = len({row["email"] for row in checkin_rows if str(row.get("entry_date", "")) >= month_start})
-
-    try:
-        calc_rows = supabase.table(TWIN_CALC_TABLE).select("email,created_at").execute().data or []
-    except Exception:
-        calc_rows = []
 
     calc_times_by_email: dict[str, list[datetime]] = {}
     for row in calc_rows:
@@ -993,17 +998,23 @@ async def ai_usage(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_ai_usage")
     today = date.today()
 
-    try:
-        rows = supabase.table(CHAT_USAGE_TABLE).select("*").execute().data or []
-    except Exception:
-        rows = []
+    def _usage_rows() -> list[dict]:
+        try:
+            return supabase.table(CHAT_USAGE_TABLE).select("*").execute().data or []
+        except Exception:
+            return []
+
+    def _usage_today() -> dict:
+        return get_ai_usage_summary(days=1)
+
+    def _usage_30d() -> dict:
+        return get_ai_usage_summary(days=30)
+
+    rows, usage_today, usage_30d = await asyncio.to_thread(run_parallel, _usage_rows, _usage_today, _usage_30d)
 
     total_requests = sum(int(row.get("count", 0)) for row in rows)
     unique_users = len({row["email"] for row in rows if row.get("email")})
     requests_today = sum(int(row.get("count", 0)) for row in rows if row.get("usage_date") == today.isoformat())
-
-    usage_today = get_ai_usage_summary(days=1)
-    usage_30d = get_ai_usage_summary(days=30)
 
     return {
         "model_configured": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
@@ -1027,7 +1038,22 @@ async def ai_usage(authorization: str | None = Header(default=None)):
 @router.get("/business/overview")
 async def business_overview(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_business")
-    premium_users = _count_rows(USER_TABLE, filters={"premium": True})
+
+    def _premium_users() -> int | None:
+        return _count_rows(USER_TABLE, filters={"premium": True})
+
+    def _revenue() -> dict:
+        return stripe_billing.get_revenue_summary()
+
+    def _subscriptions() -> dict:
+        return stripe_billing.get_subscription_summary()
+
+    def _refunds() -> dict:
+        return stripe_billing.get_refund_summary(days=30)
+
+    premium_users, revenue, subscriptions, refunds = await asyncio.to_thread(
+        run_parallel, _premium_users, _revenue, _subscriptions, _refunds
+    )
 
     configured_prices = {
         "premium_monthly": get_configured_price_id("premium", "monthly") is not None,
@@ -1037,10 +1063,6 @@ async def business_overview(authorization: str | None = Header(default=None)):
         "family_monthly": get_configured_price_id("family", "monthly") is not None,
         "family_yearly": get_configured_price_id("family", "yearly") is not None,
     }
-
-    revenue = stripe_billing.get_revenue_summary()
-    subscriptions = stripe_billing.get_subscription_summary()
-    refunds = stripe_billing.get_refund_summary(days=30)
 
     return {
         "premium_users": premium_users,
