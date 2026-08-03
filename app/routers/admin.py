@@ -853,6 +853,7 @@ async def analytics_growth(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_analytics")
     today = date.today()
     now = datetime.now(timezone.utc)
+    month_start = (today - timedelta(days=30)).isoformat()
 
     def _all_users() -> list[dict]:
         try:
@@ -861,8 +862,11 @@ async def analytics_growth(authorization: str | None = Header(default=None)):
             return []
 
     def _checkin_rows() -> list[dict]:
+        # dau_today/mau_30d below never look further back than 30 days —
+        # bounding this query avoids downloading the entire (fastest-growing)
+        # check-in history on every admin page load.
         try:
-            return supabase.table(DAILY_ENTRY_TABLE).select("email,entry_date").execute().data or []
+            return supabase.table(DAILY_ENTRY_TABLE).select("email,entry_date").gte("entry_date", month_start).execute().data or []
         except Exception:
             return []
 
@@ -885,7 +889,6 @@ async def analytics_growth(authorization: str | None = Header(default=None)):
             registrations_by_day[day] = registrations_by_day.get(day, 0) + 1
 
     dau_today = len({row["email"] for row in checkin_rows if row.get("entry_date") == today.isoformat()})
-    month_start = (today - timedelta(days=30)).isoformat()
     mau_30d = len({row["email"] for row in checkin_rows if str(row.get("entry_date", "")) >= month_start})
 
     calc_times_by_email: dict[str, list[datetime]] = {}
