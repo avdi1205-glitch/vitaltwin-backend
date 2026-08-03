@@ -589,3 +589,67 @@ class TestReleasesAndBackups:
     async def test_get_backups_empty_by_default(self, fake_supabase, fake_internal_logging_supabase, permission_spy):
         result = await admin_module.get_backups(authorization="Bearer x")
         assert result == {"items": [], "latest": None}
+
+
+class TestReleaseAndBackupWebhooks:
+    """Shared-secret CI/CD/backup-job webhooks — no admin JWT involved."""
+
+    @staticmethod
+    def _fake_request():
+        return SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    @pytest.mark.anyio
+    async def test_release_webhook_disabled_without_secret_configured(self, monkeypatch, fake_internal_logging_supabase):
+        monkeypatch.delenv("RELEASE_WEBHOOK_SECRET", raising=False)
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.create_release_webhook(
+                ReleaseInput(version="1.0.0"), self._fake_request(), x_webhook_secret="anything"
+            )
+        assert exc_info.value.status_code == 503
+
+    @pytest.mark.anyio
+    async def test_release_webhook_rejects_wrong_secret(self, monkeypatch, fake_internal_logging_supabase):
+        monkeypatch.setenv("RELEASE_WEBHOOK_SECRET", "correct-secret")
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.create_release_webhook(
+                ReleaseInput(version="1.0.0"), self._fake_request(), x_webhook_secret="wrong-secret"
+            )
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_release_webhook_accepts_correct_secret(
+        self, monkeypatch, fake_internal_logging_supabase, recorded_audit_events
+    ):
+        monkeypatch.setenv("RELEASE_WEBHOOK_SECRET", "correct-secret")
+        monkeypatch.setattr(admin_module, "record_audit_event", lambda **kwargs: recorded_audit_events.append(kwargs))
+        fake_internal_logging_supabase.release.store["vt_founder_releases"] = {
+            "insert_result": [{"id": 1, "version": "2.0.0", "build_status": "erfolgreich"}]
+        }
+        result = await admin_module.create_release_webhook(
+            ReleaseInput(version="2.0.0", build_status="erfolgreich"),
+            self._fake_request(),
+            x_webhook_secret="correct-secret",
+        )
+        assert result["version"] == "2.0.0"
+        assert recorded_audit_events[-1]["email"] == "ci_cd_pipeline"
+
+    @pytest.mark.anyio
+    async def test_backup_webhook_disabled_without_secret_configured(self, monkeypatch, fake_internal_logging_supabase):
+        monkeypatch.delenv("BACKUP_WEBHOOK_SECRET", raising=False)
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.create_backup_webhook(
+                BackupInput(status="erfolgreich"), self._fake_request(), x_webhook_secret="anything"
+            )
+        assert exc_info.value.status_code == 503
+
+    @pytest.mark.anyio
+    async def test_backup_webhook_accepts_correct_secret(self, monkeypatch, fake_internal_logging_supabase):
+        monkeypatch.setenv("BACKUP_WEBHOOK_SECRET", "correct-secret")
+        monkeypatch.setattr(admin_module, "record_audit_event", lambda **kwargs: None)
+        fake_internal_logging_supabase.backup.store["vt_founder_backup_status"] = {
+            "insert_result": [{"id": 1, "status": "erfolgreich"}]
+        }
+        result = await admin_module.create_backup_webhook(
+            BackupInput(status="erfolgreich"), self._fake_request(), x_webhook_secret="correct-secret"
+        )
+        assert result["status"] == "erfolgreich"

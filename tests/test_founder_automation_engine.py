@@ -512,6 +512,36 @@ class TestRouterBehavior:
         assert result["token_usage"] is None
 
 
+class TestRunDueWebhook:
+    """Shared-secret scheduler webhook — no admin JWT involved."""
+
+    @staticmethod
+    def _fake_request():
+        return SimpleNamespace(client=SimpleNamespace(host="127.0.0.5"))
+
+    @pytest.mark.anyio
+    async def test_disabled_without_secret_configured(self, monkeypatch, fake_supabase):
+        monkeypatch.delenv("AUTOMATION_SCHEDULER_WEBHOOK_SECRET", raising=False)
+        with pytest.raises(HTTPException) as exc_info:
+            await automation_router.run_due_automations_webhook(self._fake_request(), x_webhook_secret="anything")
+        assert exc_info.value.status_code == 503
+
+    @pytest.mark.anyio
+    async def test_rejects_wrong_secret(self, monkeypatch, fake_supabase):
+        monkeypatch.setenv("AUTOMATION_SCHEDULER_WEBHOOK_SECRET", "correct-secret")
+        with pytest.raises(HTTPException) as exc_info:
+            await automation_router.run_due_automations_webhook(self._fake_request(), x_webhook_secret="wrong")
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_accepts_correct_secret_and_runs_due_rules(self, monkeypatch, fake_supabase):
+        monkeypatch.setenv("AUTOMATION_SCHEDULER_WEBHOOK_SECRET", "correct-secret")
+        result = await automation_router.run_due_automations_webhook(
+            self._fake_request(), x_webhook_secret="correct-secret"
+        )
+        assert "executed" in result
+
+
 class TestDailyBriefingIntegration:
     def test_get_daily_briefing_summary_never_raises_without_data(self, fake_supabase):
         summary = engine.get_daily_briefing_summary()

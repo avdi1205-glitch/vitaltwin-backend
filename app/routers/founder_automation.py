@@ -34,6 +34,7 @@ from ..core.audit import record_audit_event
 from ..core.concurrency import run_parallel
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
+from ..core.webhook_auth import require_webhook_secret
 from ..services.ai_provider import AIProvider, AIProviderError, OpenAIProvider
 
 router = APIRouter()
@@ -186,6 +187,20 @@ async def automation_dashboard(authorization: str | None = Header(default=None))
 @router.post("/automation/run-due")
 async def run_due_automations(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "manage_automation_engine")
+    result = engine.evaluate_and_run_due_rules()
+    opportunity_detector.run_opportunity_detection()
+    return result
+
+
+@router.post("/automation/run-due/webhook")
+async def run_due_automations_webhook(request: Request, x_webhook_secret: str | None = Header(default=None)):
+    """Shared-secret variant of `run-due` for an external scheduler (GitHub
+    Actions cron, Railway cron, cron-job.org, ...) — no internal scheduler
+    exists in this deployment, so due rules otherwise only ever run when a
+    human opens the Automation Engine dashboard. Disabled (503) until
+    AUTOMATION_SCHEDULER_WEBHOOK_SECRET is set."""
+    enforce_rate_limit(request, "automation_run_due_webhook", max_requests=60, window_seconds=3600)
+    require_webhook_secret(x_webhook_secret, "AUTOMATION_SCHEDULER_WEBHOOK_SECRET")
     result = engine.evaluate_and_run_due_rules()
     opportunity_detector.run_opportunity_detection()
     return result

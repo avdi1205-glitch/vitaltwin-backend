@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from ..core.admin_rbac import ROLE_PERMISSIONS, require_admin, require_admin_permission
@@ -42,8 +42,10 @@ from ..core.founder_backup_status import get_latest_backup_status, list_backups,
 from ..core.founder_releases import get_latest_release, list_releases, record_release
 from ..core.integrations import get_full_integration_report
 from ..core.plans import get_configured_price_id
+from ..core.rate_limit import enforce_rate_limit
 from ..core import stripe_billing
 from ..core.supabase import supabase
+from ..core.webhook_auth import require_webhook_secret
 from ..services.privacy_export import resolve_current_consents
 from .users import set_premium_by_email
 
@@ -516,7 +518,7 @@ async def system_status(authorization: str | None = Header(default=None)):
         "openai": {"configured": bool(os.getenv("OPENAI_API_KEY", "").strip())},
         "stripe": {"configured": bool(os.getenv("STRIPE_SECRET_KEY", "").strip())},
         "storage": {"note": "Kein separates Objekt-Storage in Nutzung — keine Statusprüfung nötig."},
-        "cron_jobs": {"note": "Keine Cron-Jobs/Background-Worker im aktuellen System implementiert."},
+        "cron_jobs": {"note": "Kein interner Scheduler — externe Trigger (CI/CD, Cron) können POST /api/admin/system/releases/webhook, /system/backups/webhook und /api/admin/founder/automation/run-due/webhook aufrufen, sofern das jeweilige *_WEBHOOK_SECRET gesetzt ist."},
         "queues": {"note": "Keine Message-Queue im aktuellen System implementiert."},
         "health_connect": {"note": "Keine Health-Connect-Anbindung vorhanden."},
         "apple_health": {"note": "Keine Apple-Health-Anbindung vorhanden."},
@@ -524,12 +526,14 @@ async def system_status(authorization: str | None = Header(default=None)):
         "backup": latest_backup or {"note": "Noch keine Backups erfasst — POST /api/admin/system/backups verwenden."},
         "error_events_7d": error_summary,
         "build_status_note": (
-            "Kein CI/CD-Provider angebunden (kein GITHUB_ACTIONS/VERCEL/RAILWAY-Webhook konfiguriert) — "
-            "Build-Status wird ausschließlich über manuell/durch ein Deploy-Skript erfasste Releases oben abgebildet."
+            "Webhook-Endpoint vorhanden (POST /api/admin/system/releases/webhook), aber deaktiviert bis "
+            "RELEASE_WEBHOOK_SECRET gesetzt und im CI/CD-Job (z.B. GitHub Actions) hinterlegt ist — "
+            "bis dahin werden Releases nur manuell/über POST /api/admin/system/releases erfasst."
         ),
         "backup_provider_note": (
-            "Kein automatisierter Backup-Provider angebunden — Supabase-Backups laufen (falls im Supabase-Tarif "
-            "enthalten) außerhalb dieser App und werden hier nicht automatisch erkannt."
+            "Webhook-Endpoint vorhanden (POST /api/admin/system/backups/webhook), aber deaktiviert bis "
+            "BACKUP_WEBHOOK_SECRET gesetzt ist — Supabase-eigene Backups (falls im Tarif enthalten) laufen "
+            "außerhalb dieser App und werden hier nicht automatisch erkannt."
         ),
     }
 
@@ -580,6 +584,54 @@ async def get_backups(authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_system_status")
     items = list_backups()
     return {"items": items, "latest": items[0] if items else None}
+
+
+# ---------------------------------------------------------------------------
+# CI/CD & backup-job webhooks — shared-secret auth (no admin JWT), so an
+# automated pipeline/cron job can record real releases/backups without a
+# human founder logging in each time. Disabled (503) until the founder sets
+# the matching secret env var — see FOUNDER_OS_MISSING_INTEGRATIONS.md.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/system/releases/webhook")
+async def create_release_webhook(
+    data: ReleaseInput, request: Request, x_webhook_secret: str | None = Header(default=None)
+):
+    enforce_rate_limit(request, "release_webhook", max_requests=30, window_seconds=3600)
+    require_webhook_secret(x_webhook_secret, "RELEASE_WEBHOOK_SECRET")
+    release = record_release(
+        version=data.version,
+        released_by="ci_cd_pipeline",
+        git_commit_sha=data.git_commit_sha,
+        environment=data.environment,
+        description=data.description,
+        build_status=data.build_status,
+    )
+    if release is None:
+        raise HTTPException(status_code=500, detail="Release konnte nicht gespeichert werden.")
+    record_audit_event(user_id=None, email="ci_cd_pipeline", action="create", entity_type="release", entity_id=data.version)
+    return release
+
+
+@router.post("/system/backups/webhook")
+async def create_backup_webhook(
+    data: BackupInput, request: Request, x_webhook_secret: str | None = Header(default=None)
+):
+    enforce_rate_limit(request, "backup_webhook", max_requests=30, window_seconds=3600)
+    require_webhook_secret(x_webhook_secret, "BACKUP_WEBHOOK_SECRET")
+    backup = record_backup(
+        status=data.status,
+        backup_type=data.backup_type,
+        size_bytes=data.size_bytes,
+        completed_at=data.completed_at,
+        note=data.note,
+        recorded_by="backup_job",
+    )
+    if backup is None:
+        raise HTTPException(status_code=500, detail="Backup-Status konnte nicht gespeichert werden.")
+    record_audit_event(user_id=None, email="backup_job", action="create", entity_type="backup_status", entity_id=str(backup.get("id")))
+    return backup
 
 
 # ---------------------------------------------------------------------------

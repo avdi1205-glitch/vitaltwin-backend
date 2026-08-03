@@ -3,7 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
+from .core.sentry_setup import init_sentry
+
 load_dotenv()
+init_sentry()
 
 app = FastAPI(title="VitalTwin DE")
 
@@ -39,6 +42,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         event_type="unhandled_exception", severity="error", source=str(request.url.path),
         message=type(exc).__name__,
     )
+
+    import sentry_sdk
+
+    sentry_sdk.capture_exception(exc)  # no-op if SENTRY_DSN is unset
+
     return JSONResponse(status_code=500, content={"detail": "Interner Serverfehler."})
 
 
