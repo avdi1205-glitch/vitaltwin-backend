@@ -46,6 +46,10 @@ class _FakeQuery:
         self._record("eq", *args, **kwargs)
         return self
 
+    def neq(self, *args, **kwargs):
+        self._record("neq", *args, **kwargs)
+        return self
+
     def gte(self, *args, **kwargs):
         self._record("gte", *args, **kwargs)
         return self

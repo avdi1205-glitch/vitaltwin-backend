@@ -157,6 +157,11 @@ class ContentInput(BaseModel):
     slug: str | None = None
     body: str | None = None
     status: str = "draft"
+    excerpt: str | None = None
+    category: str | None = None
+    tags: list[str] = []
+    meta_title: str | None = None
+    meta_description: str | None = None
 
     @field_validator("content_type")
     @classmethod
@@ -1063,21 +1068,56 @@ async def analytics_growth(authorization: str | None = Header(default=None)):
 
 
 @router.get("/content")
-async def list_content(content_type: str | None = None, authorization: str | None = Header(default=None)):
+async def list_content(
+    content_type: str | None = None, status: str | None = None, authorization: str | None = Header(default=None)
+):
     require_admin_permission(authorization, "view_content")
     try:
         query = supabase.table(CONTENT_TABLE).select("*")
         if content_type:
             query = query.eq("content_type", content_type)
+        if status:
+            query = query.eq("status", status)
         rows = query.order("updated_at", desc=True).execute().data or []
     except Exception:
         rows = []
     return {"items": rows}
 
 
+@router.get("/content/{content_id}")
+async def get_content_item(content_id: str, authorization: str | None = Header(default=None)):
+    require_admin_permission(authorization, "view_content")
+    try:
+        rows = supabase.table(CONTENT_TABLE).select("*").eq("id", content_id).limit(1).execute().data or []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Inhalt konnte nicht geladen werden.") from exc
+    if not rows:
+        raise HTTPException(status_code=404, detail="Inhalt nicht gefunden.")
+    return rows[0]
+
+
+def _find_slug_conflict(content_type: str, slug: str | None, *, exclude_id: str | None = None) -> bool:
+    """A slug only needs to be unique within its own `content_type` (matches
+    the DB's own unique index `uq_vt_content_items_type_slug`). Checking
+    here first lets us return a clear 409 instead of a raw DB error."""
+    if not slug:
+        return False
+    try:
+        query = supabase.table(CONTENT_TABLE).select("id").eq("content_type", content_type).eq("slug", slug)
+        if exclude_id:
+            query = query.neq("id", exclude_id)
+        rows = query.limit(1).execute().data or []
+    except Exception:
+        return False
+    return bool(rows)
+
+
 @router.post("/content")
 async def create_content(data: ContentInput, authorization: str | None = Header(default=None)):
     admin = require_admin_permission(authorization, "manage_content")
+    if _find_slug_conflict(data.content_type, data.slug):
+        raise HTTPException(status_code=409, detail="Dieser Slug wird für diesen Content-Typ bereits verwendet.")
+
     payload = data.model_dump()
     payload["created_by"] = admin.email
     if data.status == "published":
@@ -1098,18 +1138,75 @@ async def create_content(data: ContentInput, authorization: str | None = Header(
 @router.patch("/content/{content_id}")
 async def update_content(content_id: str, data: ContentInput, authorization: str | None = Header(default=None)):
     admin = require_admin_permission(authorization, "manage_content")
+    if _find_slug_conflict(data.content_type, data.slug, exclude_id=content_id):
+        raise HTTPException(status_code=409, detail="Dieser Slug wird für diesen Content-Typ bereits verwendet.")
+
     payload = data.model_dump()
     payload["updated_at"] = datetime.now(timezone.utc).isoformat()
     if data.status == "published":
         payload["published_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
-        supabase.table(CONTENT_TABLE).update(payload).eq("id", content_id).execute()
+        response = supabase.table(CONTENT_TABLE).update(payload).eq("id", content_id).execute()
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Inhalt konnte nicht aktualisiert werden.") from exc
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Inhalt nicht gefunden.")
 
     record_audit_event(user_id=None, email=admin.email, action="update", entity_type="content_item", entity_id=content_id)
-    return {"message": "Inhalt aktualisiert."}
+    return response.data[0]
+
+
+@router.post("/content/{content_id}/publish")
+async def publish_content(content_id: str, authorization: str | None = Header(default=None)):
+    admin = require_admin_permission(authorization, "manage_content")
+    item = await get_content_item(content_id, authorization=authorization)
+
+    missing = [
+        field
+        for field, value in (("Titel", item.get("title")), ("Slug", item.get("slug")), ("Inhalt", item.get("body")))
+        if not value
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=422, detail=f"Vor Veröffentlichung fehlt noch: {', '.join(missing)}."
+        )
+    if _find_slug_conflict(item["content_type"], item["slug"], exclude_id=content_id):
+        raise HTTPException(status_code=409, detail="Dieser Slug wird für diesen Content-Typ bereits verwendet.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        response = (
+            supabase.table(CONTENT_TABLE)
+            .update({"status": "published", "published_at": now_iso, "updated_at": now_iso})
+            .eq("id", content_id)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Inhalt konnte nicht veröffentlicht werden.") from exc
+
+    record_audit_event(user_id=None, email=admin.email, action="publish", entity_type="content_item", entity_id=content_id)
+    return response.data[0] if response.data else {"message": "Veröffentlicht."}
+
+
+@router.post("/content/{content_id}/unpublish")
+async def unpublish_content(content_id: str, authorization: str | None = Header(default=None)):
+    """Reverts a published item to draft — deactivates the public
+    presentation but never deletes the underlying content or its history
+    (`published_at` is left untouched as a record of the first publish)."""
+    admin = require_admin_permission(authorization, "manage_content")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        response = (
+            supabase.table(CONTENT_TABLE).update({"status": "draft", "updated_at": now_iso}).eq("id", content_id).execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Inhalt konnte nicht auf Entwurf zurückgesetzt werden.") from exc
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Inhalt nicht gefunden.")
+
+    record_audit_event(user_id=None, email=admin.email, action="unpublish", entity_type="content_item", entity_id=content_id)
+    return response.data[0]
 
 
 @router.delete("/content/{content_id}")
