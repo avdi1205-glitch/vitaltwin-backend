@@ -60,7 +60,7 @@ PLAN_FEATURES: dict[str, dict[str, object]] = {
     },
     "pro": {
         "ai_questions_per_day": "fair-unlimited",
-        "history_days": "unlimited",
+        "history_days": "extended",
         "max_profiles": 1,
         "has_ads": False,
         "has_weekly_reports": True,
@@ -69,7 +69,7 @@ PLAN_FEATURES: dict[str, dict[str, object]] = {
     },
     "family": {
         "ai_questions_per_day": "fair-unlimited",
-        "history_days": "unlimited",
+        "history_days": "extended",
         "max_profiles": 6,
         "has_ads": False,
         "has_weekly_reports": True,

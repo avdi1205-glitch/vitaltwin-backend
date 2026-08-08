@@ -24,7 +24,7 @@ from ..services.habit_service import compute_habit_stats
 from ..services.personal_baseline import build_personal_baseline_report
 from ..services.privacy_export import count_total_export_rows, exceeds_sync_export_limit
 from ..services.trends import compute_trend
-from .users import is_premium_by_email
+from ..core.plan_service import has_feature
 
 router = APIRouter()
 
@@ -645,12 +645,13 @@ async def get_trends(authorization: str | None = Header(default=None)):
 
     Premium/Pro/Family ("Erweiterter Verlauf", see `lib/plans.ts` on the
     frontend) get a longer lookback window (90 rows -> an additional 90d
-    average per field) reusing the same `is_premium_by_email` check already
-    used in `chat.py`/`health.py`. This is enforced here, server-side, so a
-    Free account cannot obtain the extended window by calling this endpoint
-    directly — Free keeps exactly today's 7d/30d-over-30-rows behavior."""
+    average per field) via the central `has_feature` entitlement check
+    (VitalTwin Plan System, `core/plan_service.py`). This is enforced here,
+    server-side, so a Free account cannot obtain the extended window by
+    calling this endpoint directly — Free keeps exactly today's
+    7d/30d-over-30-rows behavior."""
     email = _require_email(authorization)
-    has_extended_history = is_premium_by_email(email)
+    has_extended_history = has_feature(email, "extended_history")
     row_limit = 90 if has_extended_history else 30
     windows = (7, 30, 90) if has_extended_history else (7, 30)
 

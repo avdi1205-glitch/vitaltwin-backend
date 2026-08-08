@@ -1,14 +1,14 @@
 """Unit tests for `app.routers.profile::get_trends` — specifically the
 "Erweiterter Verlauf" plan-gating added for Premium/Pro/Family (see
-`lib/plans.ts` on the frontend). Mocks Supabase and auth/premium lookup —
-no real network/database access.
+`lib/plans.ts` on the frontend). Mocks Supabase and auth/entitlement lookup
+— no real network/database access.
 
 Free must keep exactly the previous behavior (30-row limit, 7d/30d windows
-only). Premium/Pro/Family (all share the same `vt_users.premium` boolean
-today, see `routers/users.py::is_premium_by_email`) get a 90-row limit and
-an additional 90d window. The gating is server-side (`is_premium_by_email`
-checked against the authenticated user's own account), so a Free user
-cannot obtain the extended window by calling this endpoint directly."""
+only). Premium/Pro/Family (VitalTwin Plan System, see
+`core/plan_service.py::has_feature`) get a 90-row limit and an additional
+90d window. The gating is server-side (`has_feature` checked against the
+authenticated user's own account), so a Free user cannot obtain the
+extended window by calling this endpoint directly."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class TestTrendsPlanGating:
         fake = _RecordingSupabase(data=[])
         monkeypatch.setattr(profile_module, "supabase", fake)
         monkeypatch.setattr(profile_module, "_require_email", lambda auth: "free-user@example.com")
-        monkeypatch.setattr(profile_module, "is_premium_by_email", lambda email: False)
+        monkeypatch.setattr(profile_module, "has_feature", lambda email, feature: False)
 
         result = await profile_module.get_trends(authorization="Bearer x")
 
@@ -72,7 +72,7 @@ class TestTrendsPlanGating:
         fake = _RecordingSupabase(data=[])
         monkeypatch.setattr(profile_module, "supabase", fake)
         monkeypatch.setattr(profile_module, "_require_email", lambda auth: "premium-user@example.com")
-        monkeypatch.setattr(profile_module, "is_premium_by_email", lambda email: True)
+        monkeypatch.setattr(profile_module, "has_feature", lambda email, feature: True)
 
         result = await profile_module.get_trends(authorization="Bearer x")
 
@@ -83,7 +83,7 @@ class TestTrendsPlanGating:
     @pytest.mark.anyio
     async def test_gating_is_based_on_the_authenticated_users_own_account(self, monkeypatch):
         """A Free user cannot get the extended window by calling this
-        endpoint directly (no frontend-only lock): `is_premium_by_email`
+        endpoint directly (no frontend-only lock): `has_feature`
         is always looked up server-side from the caller's own email."""
         fake = _RecordingSupabase(data=[])
         monkeypatch.setattr(profile_module, "supabase", fake)
@@ -91,11 +91,11 @@ class TestTrendsPlanGating:
 
         seen_emails: list[str] = []
 
-        def fake_is_premium(email: str) -> bool:
+        def fake_has_feature(email: str, feature: str) -> bool:
             seen_emails.append(email)
             return False
 
-        monkeypatch.setattr(profile_module, "is_premium_by_email", fake_is_premium)
+        monkeypatch.setattr(profile_module, "has_feature", fake_has_feature)
 
         result = await profile_module.get_trends(authorization="Bearer x")
 

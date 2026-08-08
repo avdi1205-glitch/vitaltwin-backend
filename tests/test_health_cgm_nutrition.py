@@ -113,7 +113,7 @@ def auth_spy(monkeypatch):
     # Every other test in this file exercises the actual CGM/nutrition
     # behavior, which requires Premium (see TestPremiumGate for the
     # free-user 403 case) — default to a premium user here.
-    monkeypatch.setattr(health_module, "is_premium_by_email", lambda email: True)
+    monkeypatch.setattr(health_module, "has_feature", lambda email, feature: True)
     return calls
 
 
@@ -233,7 +233,7 @@ class TestPremiumGate:
     @pytest.fixture(autouse=True)
     def _free_user(self, monkeypatch):
         monkeypatch.setattr(health_module, "require_email", lambda authorization: "free-user@example.com")
-        monkeypatch.setattr(health_module, "is_premium_by_email", lambda email: False)
+        monkeypatch.setattr(health_module, "has_feature", lambda email, feature: False)
 
     @pytest.mark.anyio
     async def test_upload_cgm_csv_requires_premium(self, fake_supabase):

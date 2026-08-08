@@ -77,6 +77,18 @@ def fake_customer_email(monkeypatch):
     monkeypatch.setattr(payments_module, "_resolve_customer_email", lambda customer_id: "user@example.com" if customer_id else None)
 
 
+@pytest.fixture
+def plan_service_spy(monkeypatch):
+    """Spies on the VitalTwin Plan System calls the webhook makes —
+    `resolve_plan_from_price_id` defaults to returning None (unknown
+    price), `set_plan_by_email` records every call it receives."""
+    resolve_calls: list[str | None] = []
+    set_plan_calls: list[tuple] = []
+    monkeypatch.setattr(payments_module, "resolve_plan_from_price_id", lambda price_id: (resolve_calls.append(price_id), None)[1])
+    monkeypatch.setattr(payments_module, "set_plan_by_email", lambda email, plan: set_plan_calls.append((email, plan)))
+    return SimpleNamespace(resolve_calls=resolve_calls, set_plan_calls=set_plan_calls)
+
+
 class TestCheckoutCompleted:
     def test_activates_premium_from_metadata_email(self, set_premium_spy):
         payments_module._handle_checkout_completed({"metadata": {"user_email": "A@Example.com"}})
@@ -88,7 +100,7 @@ class TestCheckoutCompleted:
 
 
 class TestSubscriptionUpsert:
-    def test_stores_real_subscription_fields(self, fake_supabase, fake_customer_email):
+    def test_stores_real_subscription_fields(self, fake_supabase, fake_customer_email, plan_service_spy):
         payments_module._handle_subscription_upsert({
             "id": "sub_123",
             "customer": "cus_1",
@@ -103,26 +115,89 @@ class TestSubscriptionUpsert:
         assert rows[0]["plan_price_id"] == "price_abc"
         assert rows[0]["email"] == "user@example.com"
 
-    def test_upsert_updates_existing_row_on_conflict(self, fake_supabase, fake_customer_email):
+    def test_upsert_updates_existing_row_on_conflict(self, fake_supabase, fake_customer_email, plan_service_spy):
         payments_module._handle_subscription_upsert({"id": "sub_1", "customer": "cus_1", "status": "trialing"})
         payments_module._handle_subscription_upsert({"id": "sub_1", "customer": "cus_1", "status": "active"})
         rows = fake_supabase.tables["vt_stripe_subscriptions"]
         assert len(rows) == 1
         assert rows[0]["status"] == "active"
 
+    def test_resolves_and_stores_the_actually_purchased_plan(self, fake_supabase, fake_customer_email, monkeypatch):
+        """VitalTwin Plan System: an active subscription whose price_id
+        resolves to 'pro' must store plan='pro', not a generic 'premium'."""
+        monkeypatch.setattr(payments_module, "resolve_plan_from_price_id", lambda price_id: "pro" if price_id == "price_pro_monthly" else None)
+        set_plan_calls: list[tuple] = []
+        monkeypatch.setattr(payments_module, "set_plan_by_email", lambda email, plan: set_plan_calls.append((email, plan)))
+
+        payments_module._handle_subscription_upsert({
+            "id": "sub_pro",
+            "customer": "cus_1",
+            "status": "active",
+            "items": {"data": [{"price": {"id": "price_pro_monthly"}}]},
+        })
+        assert set_plan_calls == [("user@example.com", "pro")]
+
+    def test_family_price_id_resolves_to_family_plan(self, fake_supabase, fake_customer_email, monkeypatch):
+        monkeypatch.setattr(payments_module, "resolve_plan_from_price_id", lambda price_id: "family" if price_id == "price_family_yearly" else None)
+        set_plan_calls: list[tuple] = []
+        monkeypatch.setattr(payments_module, "set_plan_by_email", lambda email, plan: set_plan_calls.append((email, plan)))
+
+        payments_module._handle_subscription_upsert({
+            "id": "sub_family",
+            "customer": "cus_1",
+            "status": "active",
+            "items": {"data": [{"price": {"id": "price_family_yearly"}}]},
+        })
+        assert set_plan_calls == [("user@example.com", "family")]
+
+    def test_unknown_price_id_falls_back_to_generic_premium(self, fake_supabase, fake_customer_email, plan_service_spy, set_premium_spy):
+        """A price_id that doesn't match any currently configured plan (e.g.
+        an old/removed price) must still grant access via the legacy
+        boolean fallback rather than silently granting nothing."""
+        payments_module._handle_subscription_upsert({
+            "id": "sub_legacy",
+            "customer": "cus_1",
+            "status": "active",
+            "items": {"data": [{"price": {"id": "price_unknown"}}]},
+        })
+        assert plan_service_spy.set_plan_calls == []
+        assert set_premium_spy == [("user@example.com", True)]
+
+    def test_past_due_status_does_not_touch_the_stored_plan(self, fake_supabase, fake_customer_email, monkeypatch):
+        """A status transition to past_due/unpaid is a dunning/retry state,
+        not a definitive end — only `customer.subscription.deleted` (or an
+        explicit cancellation) should downgrade the plan."""
+        resolve_calls: list[str | None] = []
+        set_plan_calls: list[tuple] = []
+        monkeypatch.setattr(payments_module, "resolve_plan_from_price_id", lambda price_id: (resolve_calls.append(price_id), "pro")[1])
+        monkeypatch.setattr(payments_module, "set_plan_by_email", lambda email, plan: set_plan_calls.append((email, plan)))
+
+        payments_module._handle_subscription_upsert({
+            "id": "sub_1",
+            "customer": "cus_1",
+            "status": "past_due",
+            "items": {"data": [{"price": {"id": "price_pro_monthly"}}]},
+        })
+        assert set_plan_calls == []
+
 
 class TestSubscriptionDeleted:
-    def test_marks_canceled_and_downgrades_premium(self, fake_supabase, fake_customer_email, set_premium_spy):
+    def test_marks_canceled_and_downgrades_to_free_plan(self, fake_supabase, fake_customer_email, monkeypatch):
+        set_plan_calls: list[tuple] = []
+        monkeypatch.setattr(payments_module, "set_plan_by_email", lambda email, plan: set_plan_calls.append((email, plan)))
+
         payments_module._handle_subscription_deleted({"id": "sub_1", "customer": "cus_1"})
         rows = fake_supabase.tables["vt_stripe_subscriptions"]
         assert rows[0]["status"] == "canceled"
         assert rows[0]["canceled_at"] is not None
-        assert set_premium_spy == [("user@example.com", False)]
+        assert set_plan_calls == [("user@example.com", "free")]
 
-    def test_no_downgrade_if_email_cannot_be_resolved(self, fake_supabase, set_premium_spy, monkeypatch):
+    def test_no_downgrade_if_email_cannot_be_resolved(self, fake_supabase, monkeypatch):
         monkeypatch.setattr(payments_module, "_resolve_customer_email", lambda customer_id: None)
+        set_plan_calls: list[tuple] = []
+        monkeypatch.setattr(payments_module, "set_plan_by_email", lambda email, plan: set_plan_calls.append((email, plan)))
         payments_module._handle_subscription_deleted({"id": "sub_1", "customer": "cus_1"})
-        assert set_premium_spy == []
+        assert set_plan_calls == []
 
 
 class TestInvoicePaid:

@@ -59,7 +59,7 @@ from ..services.twin_conversation import (
     contains_medical_red_flag,
     detect_prompt_injection,
 )
-from .users import is_premium_by_email
+from ..core.plan_service import get_plan_by_email
 
 router = APIRouter()
 
@@ -99,10 +99,10 @@ def _require_email(authorization: str | None) -> str:
 
 
 def _current_plan(email: str) -> str:
-    # The database only distinguishes free/premium today (see Block 3 open
-    # items) — pro/family accounts are treated as "premium" until a real
-    # `plan` field exists.
-    return "premium" if is_premium_by_email(email) else "free"
+    # Real plan lookup (VitalTwin Plan System) — Pro/Family now correctly
+    # get their own configured CHAT_DAILY_LIMITS/CONTEXT_CHAR_LIMITS instead
+    # of being collapsed into "premium".
+    return get_plan_by_email(email)
 
 
 def _get_ai_provider() -> AIProvider:

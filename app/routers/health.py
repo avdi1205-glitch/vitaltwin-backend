@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..core.auth import require_email
 from ..core.supabase import supabase
-from .users import is_premium_by_email
+from ..core.plan_service import has_feature
 
 router = APIRouter()
 
@@ -43,10 +43,10 @@ PREMIUM_REQUIRED_DETAIL = (
 def _require_premium(email: str) -> None:
     """Hard paywall for this whole router — CGM import/nutrition logging is
     a Premium-exclusive feature (product decision), not a soft limit like
-    `routers/chat.py`'s free/premium AI tiering. Uses the same
-    `is_premium_by_email` helper already used there and in
-    `routers/payments.py` — no parallel premium-check logic."""
-    if not is_premium_by_email(email):
+    `routers/chat.py`'s free/premium AI tiering. Uses the central
+    `has_feature` entitlement check (VitalTwin Plan System) — Premium, Pro,
+    and Family all include the `cgm_nutrition` feature."""
+    if not has_feature(email, "cgm_nutrition"):
         raise HTTPException(status_code=403, detail=PREMIUM_REQUIRED_DETAIL)
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB — a multi-week CGM export is a few hundred KB at most.

@@ -70,11 +70,15 @@ class TestChatRequestValidation:
 
 class TestCurrentPlan:
     def test_premium_user_resolves_to_premium(self, monkeypatch):
-        monkeypatch.setattr(chat_module, "is_premium_by_email", lambda email: True)
+        monkeypatch.setattr(chat_module, "get_plan_by_email", lambda email: "premium")
         assert chat_module._current_plan("user@example.com") == "premium"
 
+    def test_pro_user_resolves_to_pro(self, monkeypatch):
+        monkeypatch.setattr(chat_module, "get_plan_by_email", lambda email: "pro")
+        assert chat_module._current_plan("user@example.com") == "pro"
+
     def test_non_premium_user_resolves_to_free(self, monkeypatch):
-        monkeypatch.setattr(chat_module, "is_premium_by_email", lambda email: False)
+        monkeypatch.setattr(chat_module, "get_plan_by_email", lambda email: "free")
         assert chat_module._current_plan("user@example.com") == "free"
 
 

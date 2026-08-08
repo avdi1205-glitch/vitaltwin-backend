@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from ..core import stripe_billing
 from ..core.plans import get_all_configured_price_ids, get_configured_price_id
+from ..core.plan_service import resolve_plan_from_price_id, set_plan_by_email
 from .users import get_email_by_token, set_premium_by_email
 
 load_dotenv()
@@ -143,6 +144,22 @@ def _handle_subscription_upsert(subscription: dict) -> None:
         cancel_at_period_end=bool(subscription.get("cancel_at_period_end")),
     )
 
+    # Store the tier ACTUALLY purchased (VitalTwin Plan System) — only for
+    # a genuinely active/trialing subscription; a status change to
+    # past_due/unpaid/incomplete does not touch the stored plan (that is
+    # a dunning/retry state, not a definitive end — only
+    # `customer.subscription.deleted` below downgrades to free).
+    if email and subscription.get("status") in {"active", "trialing"}:
+        resolved_plan = resolve_plan_from_price_id(price_id)
+        if resolved_plan:
+            set_plan_by_email(email, resolved_plan)
+        else:
+            # Unknown/legacy price_id we can't map to a plan — fall back to
+            # the old behavior (generic premium) rather than silently doing
+            # nothing, so an existing configured Stripe price that predates
+            # this mapping still grants access.
+            set_premium_by_email(email, True)
+
 
 def _handle_subscription_deleted(subscription: dict) -> None:
     email = _resolve_customer_email(subscription.get("customer"))
@@ -155,10 +172,11 @@ def _handle_subscription_deleted(subscription: dict) -> None:
     )
     # The subscription has genuinely ended (Stripe only fires this event
     # after any cancel_at_period_end grace period, or on immediate
-    # cancellation) — downgrading here keeps `premium` truthful instead of
-    # leaving it stuck `True` forever after a real cancellation.
+    # cancellation) — downgrading here keeps `premium`/`plan` truthful
+    # instead of leaving them stuck at a paid tier forever after a real
+    # cancellation.
     if email:
-        set_premium_by_email(email, False)
+        set_plan_by_email(email, "free")
 
 
 def _handle_invoice_paid(invoice: dict) -> None:

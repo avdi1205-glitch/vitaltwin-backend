@@ -117,6 +117,30 @@ def _ensure_supabase_auth_shadow_user(email: str) -> None:
 
 
 def _db_get_user(email: str) -> dict[str, object] | None:
+    # Defensive two-step select: migration 027 (adds `vt_users.plan`) may
+    # not have been run in Supabase yet when this code deploys (this repo's
+    # established pattern — migrations are applied manually and often lag
+    # behind a deploy by days). Selecting a column that does not exist yet
+    # would make Postgrest reject the WHOLE query, which without this
+    # fallback would make every existing user look logged-out/non-premium
+    # until the migration runs — a real regression risk, not just
+    # theoretical. Falls back to the pre-migration column set so existing
+    # behavior is preserved either way; `plan` starts implicitly missing
+    # (handled by `_normalize_user_record`'s legacy fallback) until the
+    # migration is applied.
+    try:
+        response = (
+            supabase.table(USER_TABLE)
+            .select("email,full_name,password,premium,suspended,plan")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+        )
+        data = response.data or []
+        return data[0] if data else None
+    except Exception:
+        pass
+
     try:
         response = (
             supabase.table(USER_TABLE)
@@ -126,9 +150,7 @@ def _db_get_user(email: str) -> dict[str, object] | None:
             .execute()
         )
         data = response.data or []
-        if not data:
-            return None
-        return data[0]
+        return data[0] if data else None
     except Exception:
         return None
 
@@ -157,6 +179,19 @@ def _db_update_premium(email: str, premium: bool) -> bool:
         (
             supabase.table(USER_TABLE)
             .update({"premium": premium})
+            .eq("email", email)
+            .execute()
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _db_update_plan(email: str, plan: str) -> bool:
+    try:
+        (
+            supabase.table(USER_TABLE)
+            .update({"plan": plan})
             .eq("email", email)
             .execute()
         )
@@ -244,11 +279,17 @@ def _verify_google_credential(credential: str) -> dict[str, object]:
 
 
 def _normalize_user_record(record: dict[str, object]) -> dict[str, object]:
+    plan = str(record.get("plan") or "").strip().lower()
+    if plan not in {"free", "premium", "pro", "family"}:
+        # Defensive legacy fallback for rows that predate migration 027's
+        # backfill (should not normally happen).
+        plan = "premium" if bool(record.get("premium", False)) else "free"
     return {
         "password": record.get("password", ""),
         "full_name": record.get("full_name", ""),
         "premium": bool(record.get("premium", False)),
         "suspended": bool(record.get("suspended", False)),
+        "plan": plan,
     }
 
 
@@ -298,13 +339,42 @@ def _record_login_event(*, email: str, success: bool, request: Request) -> None:
 
 
 def set_premium_by_email(email: str, premium: bool) -> bool:
+    """Legacy boolean setter — kept for every existing caller (admin
+    premium-toggle, Stripe checkout-completed, activate-beta). Now also
+    plan-aware to keep `vt_users.plan` truthful without requiring every
+    caller to be rewritten (migration 027 / plan-architecture task):
+
+    - `premium=False` always downgrades to `plan='free'` (a real
+      cancellation/suspension must never leave a stale higher tier).
+    - `premium=True` only ever sets `plan='premium'` when the account is
+      currently `free` — it deliberately never downgrades an existing
+      `pro`/`family` plan back to plain `premium` (e.g. Beta-Zugang must
+      never demote a real paying Pro/Family customer). Callers that need to
+      set an EXACT plan (e.g. the Stripe webhook resolving which tier was
+      actually purchased) must use `core/plan_service.py::set_plan_by_email`
+      instead.
+    """
     normalized_email = email.lower()
     user = _get_user(normalized_email)
 
     if user:
         user["premium"] = premium
+        current_plan = str(user.get("plan", "free") or "free")
+        if not premium:
+            user["plan"] = "free"
+        elif current_plan not in {"pro", "family"}:
+            user["plan"] = "premium"
 
     db_updated = _db_update_premium(normalized_email, premium)
+
+    if not premium:
+        _db_update_plan(normalized_email, "free")
+    else:
+        existing = _db_get_user(normalized_email)
+        existing_plan = str((existing or {}).get("plan") or "free")
+        if existing_plan not in {"pro", "family"}:
+            _db_update_plan(normalized_email, "premium")
+
     return bool(user) or db_updated
 
 
@@ -344,6 +414,7 @@ async def register(req: RegisterRequest, request: Request):
         "password": hashed_password,
         "full_name": req.full_name,
         "premium": False,
+        "plan": "free",
     }
 
     if not created_in_db:
@@ -411,11 +482,13 @@ async def google_login(req: GoogleLoginRequest):
 
     token = _create_access_token(email)
 
+    plan = str(user.get("plan") or ("premium" if user.get("premium") else "free"))
     return {
         "access_token": token,
         "message": "Login erfolgreich",
         "email": email,
         "premium": bool(user.get("premium", False)),
+        "plan": plan,
     }
 
 
@@ -463,6 +536,7 @@ async def me(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=404, detail="User nicht gefunden")
 
     premium = bool(user.get("premium", False))
+    plan = str(user.get("plan") or ("premium" if premium else "free"))
     starter_calc_remaining: int | None = None
     if not premium:
         starter_calc_remaining = 0 if _db_has_calculation(email) else 1
@@ -471,6 +545,7 @@ async def me(authorization: str | None = Header(default=None)):
         "email": email,
         "full_name": user.get("full_name"),
         "premium": premium,
+        "plan": plan,
         "starter_calc_remaining": starter_calc_remaining,
     }
 
@@ -489,8 +564,11 @@ async def activate_beta(authorization: str | None = Header(default=None)):
     if not user:
         raise HTTPException(status_code=404, detail="User nicht gefunden")
 
-    if bool(user.get("premium", False)):
-        return {"message": "Beta-Zugang ist bereits aktiv.", "premium": True}
+    current_plan = str(user.get("plan") or ("premium" if user.get("premium") else "free"))
+    if current_plan != "free":
+        # Never downgrade a real paying Pro/Family (or already-Premium)
+        # account back to a plain Beta-Premium state.
+        return {"message": "Beta-Zugang ist bereits aktiv.", "premium": True, "plan": current_plan}
 
     updated = set_premium_by_email(email, True)
     if not updated:
@@ -499,6 +577,7 @@ async def activate_beta(authorization: str | None = Header(default=None)):
     return {
         "message": "Beta-Zugang kostenlos aktiviert. Danke, dass du als Tester dabei bist.",
         "premium": True,
+        "plan": "premium",
     }
 
 
