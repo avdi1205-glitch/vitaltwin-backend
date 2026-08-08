@@ -24,6 +24,7 @@ from ..services.habit_service import compute_habit_stats
 from ..services.personal_baseline import build_personal_baseline_report
 from ..services.privacy_export import count_total_export_rows, exceeds_sync_export_limit
 from ..services.trends import compute_trend
+from .users import is_premium_by_email
 
 router = APIRouter()
 
@@ -640,8 +641,18 @@ async def delete_daily_entry(entry_date: str, authorization: str | None = Header
 async def get_trends(authorization: str | None = Header(default=None)):
     """Sleep, movement, stress, and recovery trends over 7 and 30 days
     (Etappe 3 §2-4). Deliberately just transparent averages — no AI
-    interpretation, no diagnosis (see `services/trends.py` docstring)."""
+    interpretation, no diagnosis (see `services/trends.py` docstring).
+
+    Premium/Pro/Family ("Erweiterter Verlauf", see `lib/plans.ts` on the
+    frontend) get a longer lookback window (90 rows -> an additional 90d
+    average per field) reusing the same `is_premium_by_email` check already
+    used in `chat.py`/`health.py`. This is enforced here, server-side, so a
+    Free account cannot obtain the extended window by calling this endpoint
+    directly — Free keeps exactly today's 7d/30d-over-30-rows behavior."""
     email = _require_email(authorization)
+    has_extended_history = is_premium_by_email(email)
+    row_limit = 90 if has_extended_history else 30
+    windows = (7, 30, 90) if has_extended_history else (7, 30)
 
     try:
         response = (
@@ -649,7 +660,7 @@ async def get_trends(authorization: str | None = Header(default=None)):
             .select("*")
             .eq("email", email)
             .order("entry_date", desc=True)
-            .limit(30)
+            .limit(row_limit)
             .execute()
         )
         entries = response.data or []
@@ -660,7 +671,7 @@ async def get_trends(authorization: str | None = Header(default=None)):
     fields = ["sleep_hours", "sleep_quality", "movement_minutes", "stress", "recovery", "mood", "energy"]
     trends: dict[str, dict[str, object]] = {}
     for field in fields:
-        for window in (7, 30):
+        for window in windows:
             trend = compute_trend(entries, field=field, window_days=window, today=today)
             trends.setdefault(field, {})[f"{window}d"] = {
                 "average": trend.average,
@@ -668,10 +679,14 @@ async def get_trends(authorization: str | None = Header(default=None)):
                 "data_quality": trend.data_quality,
             }
 
-    return {"trends": trends, "disclaimer": (
-        "Diese Trends sind transparente Durchschnittswerte deiner eigenen Eintragungen \u2014 "
-        "keine medizinische Bewertung und keine Diagnose."
-    )}
+    return {
+        "trends": trends,
+        "extended_history": has_extended_history,
+        "disclaimer": (
+            "Diese Trends sind transparente Durchschnittswerte deiner eigenen Eintragungen \u2014 "
+            "keine medizinische Bewertung und keine Diagnose."
+        ),
+    }
 
 @router.get("/baseline")
 async def get_personal_baseline(authorization: str | None = Header(default=None)):
