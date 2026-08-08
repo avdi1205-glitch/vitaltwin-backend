@@ -150,28 +150,29 @@ def has_feature(email: str, feature: str) -> bool:
 
 def set_plan_by_email(email: str, plan: PlanId) -> bool:
     """The only place that should write `vt_users.plan`. Keeps the legacy
-    `premium` boolean AND the in-process `users_store` cache
-    (`routers/users.py`) in sync via `set_premium_by_email()` — a local
-    import here avoids a circular import at module-load time (same
+    `premium` boolean in sync via `routers/users.py::set_premium_by_email`
+    (local import here avoids a circular import at module-load time, same
     established pattern as `automation_engine.py`'s local imports of
-    sibling modules)."""
+    sibling modules) — this ALSO means an intermediate `plan='premium'`
+    write can happen first for a Free->Pro/Family change (the shared
+    "never downgrade pro/family" guard in that function only ever upgrades
+    to 'premium'), which the explicit `plan` write immediately below then
+    corrects to the exact requested tier. Returns True only if a row was
+    ACTUALLY updated (checks `response.data`, not just "no exception") —
+    a Postgrest UPDATE matching zero rows does not raise, so relying on
+    the absence of an exception alone would silently report success for a
+    write that changed nothing."""
     if plan not in VALID_PLANS:
         raise ValueError(f"Unbekannter Tarif: {plan!r}")
     normalized_email = email.strip().lower()
 
     from ..routers.users import set_premium_by_email  # local import: breaks core<->routers cycle
 
-    # Keeps `premium`/the in-process cache consistent for any code still
-    # reading the boolean. Uses the internal setter (not the public
-    # `set_premium_by_email`) so it does not re-trigger the "never
-    # downgrade an existing pro/family plan" guard that function applies to
-    # plain boolean callers — here we are intentionally setting an exact,
-    # known-correct plan (e.g. from a verified Stripe event).
     set_premium_by_email(normalized_email, plan != "free")
 
     try:
-        supabase.table(USER_TABLE).update({"plan": plan}).eq("email", normalized_email).execute()
-        return True
+        response = supabase.table(USER_TABLE).update({"plan": plan}).eq("email", normalized_email).execute()
+        return bool(response.data)
     except Exception:
         return False
 

@@ -757,7 +757,9 @@ async def set_user_plan(email: str, data: PlanChangeInput, authorization: str | 
     if not existing:
         raise HTTPException(status_code=404, detail="Nutzer nicht gefunden.")
 
-    set_plan_by_email(email, data.plan)
+    updated = set_plan_by_email(email, data.plan)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Tarif konnte nicht gespeichert werden.")
 
     record_audit_event(
         user_id=None, email=admin.email, action="update", entity_type="user_plan", entity_id=email,

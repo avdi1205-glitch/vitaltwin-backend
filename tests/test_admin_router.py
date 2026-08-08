@@ -691,7 +691,7 @@ class TestSetUserPlan:
     ):
         fake_supabase.store["vt_users"] = {"data": [{"email": "user@example.com"}]}
         calls: list[tuple] = []
-        monkeypatch.setattr(admin_module, "set_plan_by_email", lambda email, plan: calls.append((email, plan)))
+        monkeypatch.setattr(admin_module, "set_plan_by_email", lambda email, plan: (calls.append((email, plan)), True)[1])
 
         result = await admin_module.set_user_plan("user@example.com", PlanChangeInput(plan="family"), authorization="Bearer x")
 
@@ -699,6 +699,21 @@ class TestSetUserPlan:
         assert result["plan"] == "family"
         assert recorded_audit_events[-1]["entity_type"] == "user_plan"
         assert recorded_audit_events[-1]["metadata"] == {"plan": "family", "trigger": "admin_manual_override"}
+
+    @pytest.mark.anyio
+    async def test_surfaces_a_real_error_instead_of_a_false_success_when_the_write_fails(
+        self, fake_supabase, permission_spy, monkeypatch
+    ):
+        """Regression test: the endpoint used to discard `set_plan_by_email`'s
+        return value and always report success, even on a silent DB-write
+        failure — a real bug found live (admin clicked "Pro", UI said
+        success, but the plan never actually changed)."""
+        fake_supabase.store["vt_users"] = {"data": [{"email": "user@example.com"}]}
+        monkeypatch.setattr(admin_module, "set_plan_by_email", lambda email, plan: False)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.set_user_plan("user@example.com", PlanChangeInput(plan="pro"), authorization="Bearer x")
+        assert exc_info.value.status_code == 500
 
 
 class TestQACleanup:
