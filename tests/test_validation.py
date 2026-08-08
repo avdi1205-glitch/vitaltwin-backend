@@ -3,7 +3,7 @@
 Pure functions, no database/network access required.
 """
 
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -59,12 +59,16 @@ class TestMovementMinutes:
 
 class TestLocalDateNotFuture:
     def test_rejects_tomorrow(self):
-        tomorrow = date.today() + timedelta(days=1)
+        # `validate_local_date_not_future` compares against UTC — the test
+        # must use the SAME clock source, otherwise it flakes depending on
+        # the machine's local timezone offset and time of day (e.g. a local
+        # date already one day ahead of UTC near midnight in UTC+ zones).
+        tomorrow = datetime.now(timezone.utc).date() + timedelta(days=1)
         with pytest.raises(ValueError):
             validate_local_date_not_future(tomorrow, field_name="Check-in-Datum")
 
     def test_accepts_today_and_past(self):
-        today = date.today()
+        today = datetime.now(timezone.utc).date()
         assert validate_local_date_not_future(today) == today
         yesterday = today - timedelta(days=1)
         assert validate_local_date_not_future(yesterday) == yesterday

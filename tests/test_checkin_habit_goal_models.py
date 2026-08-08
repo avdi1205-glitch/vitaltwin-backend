@@ -3,7 +3,7 @@
 no network/database access (Supabase client creation doesn't connect at
 import time)."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -17,8 +17,14 @@ from app.routers.profile import (
     HabitUpdate,
 )
 
-TOMORROW = date.today() + timedelta(days=1)
-YESTERDAY = date.today() - timedelta(days=1)
+# `validate_local_date_not_future` (used by `entry_date`/`target_date`
+# fields below) compares against UTC internally — these fixtures must use
+# the SAME clock source, otherwise they flake depending on the machine's
+# local timezone offset and time of day (a local date can already be one
+# day ahead of UTC's date near midnight in UTC+ zones).
+UTC_TODAY = datetime.now(timezone.utc).date()
+TOMORROW = UTC_TODAY + timedelta(days=1)
+YESTERDAY = UTC_TODAY - timedelta(days=1)
 
 
 class TestDailyWellnessEntryInput:
@@ -43,7 +49,7 @@ class TestDailyWellnessEntryInput:
             DailyWellnessEntryInput(entry_date=TOMORROW)
 
     def test_accepts_today_and_past_entry_date(self):
-        assert DailyWellnessEntryInput(entry_date=date.today()).entry_date == date.today()
+        assert DailyWellnessEntryInput(entry_date=UTC_TODAY).entry_date == UTC_TODAY
         assert DailyWellnessEntryInput(entry_date=YESTERDAY).entry_date == YESTERDAY
 
     def test_note_too_long_is_rejected(self):
