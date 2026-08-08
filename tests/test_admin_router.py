@@ -368,6 +368,46 @@ class TestDeletionRequests:
         assert recorded_audit_events[-1]["entity_id"] == "user@example.com"
 
 
+class TestDirectUserDeletion:
+    """Admin-initiated hard delete (distinct from the GDPR self-service
+    request/complete flow) — the real gap the founder reported: no button
+    existed to remove a problematic user who never requested deletion
+    themselves."""
+
+    @pytest.mark.anyio
+    async def test_deletes_user_and_records_audit_event(self, monkeypatch, fake_supabase, permission_spy, recorded_audit_events):
+        from app.core import account_deletion
+
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        monkeypatch.setattr(admin_module, "purge_all_user_data", lambda email: {"vt_users": 1, "vt_habits": 3})
+
+        result = await admin_module.delete_user("spam@example.com", authorization="Bearer x")
+
+        assert permission_spy[-1][1] == "manage_users"
+        assert result["deleted_rows"] == {"vt_users": 1, "vt_habits": 3}
+        assert recorded_audit_events[-1]["action"] == "delete"
+        assert recorded_audit_events[-1]["entity_type"] == "user_account"
+        assert recorded_audit_events[-1]["metadata"]["trigger"] == "admin_direct"
+
+    @pytest.mark.anyio
+    async def test_refuses_to_delete_a_super_admin(self, monkeypatch, fake_supabase, permission_spy):
+        fake_supabase.store["vt_admin_roles"] = {"data": [{"role": "super_admin"}]}
+        monkeypatch.setattr(admin_module, "purge_all_user_data", lambda email: {"vt_users": 1})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.delete_user("founder@example.com", authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_404_when_user_does_not_exist(self, monkeypatch, fake_supabase, permission_spy):
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        monkeypatch.setattr(admin_module, "purge_all_user_data", lambda email: {"vt_users": 0})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.delete_user("nobody@example.com", authorization="Bearer x")
+        assert exc_info.value.status_code == 404
+
+
 class TestSuspendUnsuspend:
     @pytest.mark.anyio
     async def test_suspend_updates_row_and_records_audit_event(self, fake_supabase, permission_spy, recorded_audit_events):

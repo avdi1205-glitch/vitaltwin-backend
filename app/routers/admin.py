@@ -397,6 +397,41 @@ async def get_user_detail(email: str, authorization: str | None = Header(default
     }
 
 
+@router.delete("/users/{email}")
+async def delete_user(email: str, authorization: str | None = Header(default=None)):
+    """Admin-initiated hard delete — distinct from the GDPR self-service
+    flow (`/users/{email}/deletion-requests/complete`), which only ever
+    completes a deletion the USER themselves already requested. This lets a
+    founder directly remove a problematic/spam account without waiting for
+    that. Reuses the same `purge_all_user_data()` used by the GDPR flow —
+    one deletion implementation, not two. Deleting the row from `vt_users`
+    structurally prevents any further login (auth checks that table
+    directly), no separate "disabled" flag needed."""
+    admin = require_admin_permission(authorization, "manage_users")
+    email = email.strip().lower()
+
+    try:
+        role_rows = supabase.table(ADMIN_ROLE_TABLE).select("role").eq("email", email).limit(1).execute().data or []
+    except Exception:
+        role_rows = []
+    if role_rows and role_rows[0].get("role") == "super_admin":
+        raise HTTPException(status_code=403, detail="Super-Admin-Konten können nicht gelöscht werden.")
+
+    deleted_rows = purge_all_user_data(email)
+    if not deleted_rows.get(USER_TABLE):
+        raise HTTPException(status_code=404, detail="Nutzer nicht gefunden.")
+
+    record_audit_event(
+        user_id=None,
+        email=admin.email,
+        action="delete",
+        entity_type="user_account",
+        entity_id=email,
+        metadata={"deleted_rows": deleted_rows, "trigger": "admin_direct"},
+    )
+    return {"message": "Nutzer und alle zugehörigen Daten wurden gelöscht.", "email": email, "deleted_rows": deleted_rows}
+
+
 @router.post("/users/{email}/suspend")
 async def suspend_user(email: str, data: SuspendInput, authorization: str | None = Header(default=None)):
     admin = require_admin_permission(authorization, "manage_users")
