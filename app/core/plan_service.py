@@ -81,6 +81,20 @@ def _normalize_plan(value: object) -> PlanId:
     return text if text in VALID_PLANS else "free"  # type: ignore[return-value]
 
 
+def normalize_plan_row(row: dict[str, object] | None) -> PlanId:
+    """Same normalization/fallback rule as `get_plan_by_email`, but for a
+    row the CALLER already fetched (e.g. an admin list endpoint that
+    selected `plan,premium` for many users in one query) — avoids an N+1
+    per-row DB round trip. Use this whenever the row is already in hand;
+    use `get_plan_by_email` only when you don't already have it."""
+    if not row:
+        return "free"
+    plan = row.get("plan")
+    if plan:
+        return _normalize_plan(plan)
+    return "premium" if bool(row.get("premium", False)) else "free"
+
+
 def get_plan_by_email(email: str) -> PlanId:
     """Reads the real, current plan for `email` directly from the database
     (deliberately not cached — this is the security-relevant read path, and
@@ -124,15 +138,7 @@ def get_plan_by_email(email: str) -> PlanId:
     if not rows:
         return "free"
 
-    row = rows[0]
-    plan = row.get("plan")
-    if plan:
-        return _normalize_plan(plan)
-
-    # Defensive legacy fallback — either the migration hasn't run yet (no
-    # `plan` column at all) or this specific row somehow predates the
-    # backfill.
-    return "premium" if bool(row.get("premium", False)) else "free"
+    return normalize_plan_row(rows[0])
 
 
 def has_feature(email: str, feature: str) -> bool:

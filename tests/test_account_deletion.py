@@ -94,6 +94,31 @@ def test_purge_deletes_across_all_tables_and_recommendation_children(monkeypatch
     assert tables[account_deletion.USER_TABLE] == []
 
 
+def test_purge_covers_twin_calculations_cgm_and_nutrition(monkeypatch):
+    """Regression test (admin/deletion round): a dependency audit found
+    `vt_twin_calculations`/`vt_cgm_readings`/`vt_nutrition_entries` were
+    missing from the deletion coverage — real personal health data that
+    would have been orphaned after account deletion."""
+    email = "user-a@example.com"
+    tables = {
+        account_deletion.CALC_TABLE: [{"id": "calc-1", "email": email}],
+        account_deletion.CGM_TABLE: [{"id": "cgm-1", "email": email}],
+        account_deletion.NUTRITION_TABLE: [{"id": "nutr-1", "email": email}],
+        account_deletion.USER_TABLE: [{"email": email}],
+    }
+    fake = _FakeSupabase(tables)
+    monkeypatch.setattr(account_deletion, "supabase", fake)
+
+    result = account_deletion.purge_all_user_data(email)
+
+    assert result[account_deletion.CALC_TABLE] == 1
+    assert result[account_deletion.CGM_TABLE] == 1
+    assert result[account_deletion.NUTRITION_TABLE] == 1
+    assert tables[account_deletion.CALC_TABLE] == []
+    assert tables[account_deletion.CGM_TABLE] == []
+    assert tables[account_deletion.NUTRITION_TABLE] == []
+
+
 def test_purge_never_touches_other_users_data(monkeypatch):
     tables = {
         account_deletion.HABIT_TABLE: [

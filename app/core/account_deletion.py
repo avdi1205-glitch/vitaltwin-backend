@@ -32,12 +32,34 @@ CONTEXT_SNAPSHOT_TABLE = "vt_twin_context_snapshots"
 CHAT_USAGE_TABLE = "vt_chat_usage"
 FEEDBACK_TABLE = "vt_user_feedback"
 LOGIN_EVENT_TABLE = "vt_login_events"
+CALC_TABLE = "vt_twin_calculations"
+CGM_TABLE = "vt_cgm_readings"
+NUTRITION_TABLE = "vt_nutrition_entries"
 
 # Tables keyed directly by `email` (safe to delete in any order — none of
 # these are referenced by a foreign id from another table in this list).
-# `vt_audit_events` is deliberately NOT included: audit history is kept
-# even after account deletion, matching this table's purpose as a
-# security/compliance log rather than user-facing data.
+#
+# DELIBERATELY EXCLUDED (dependency analysis, plan-architecture/admin round):
+# - `vt_audit_events`: kept as a security/compliance log, not user-facing
+#   data — unchanged, pre-existing decision.
+# - `vt_stripe_subscriptions`/`vt_stripe_payments`/`vt_stripe_refunds`: real
+#   invoices/payments may be subject to statutory retention (German
+#   HGB/AO bookkeeping rules commonly require ~10 years) — never blindly
+#   deleted here. A future anonymization pass (keep the financial record,
+#   strip the email) would need explicit legal/accounting sign-off from the
+#   founder; not invented here.
+# - `vt_contact_messages`/`vt_beta_applications`: independent business
+#   records (a contact message or beta application isn't necessarily tied
+#   to a registered account — e.g. a prospect who never registered) — same
+#   category as the audit-log exception, not part of "this account's data".
+# - Google Health tables (`user_health_connections`, `health_oauth_states`,
+#   `health_sync_runs`, `health_activity_records`, `health_sleep_records`,
+#   `health_metric_records`): NOT listed here on purpose — all six have
+#   `user_id bigint references vt_users(id) ON DELETE CASCADE` (migration
+#   024), so deleting the `vt_users` row below already removes every one of
+#   them at the database level. Listing them again here would be redundant
+#   (and they're keyed by `user_id`, not `email`, so they don't fit this
+#   email-scoped loop anyway).
 _DIRECT_EMAIL_TABLES: tuple[str, ...] = (
     DAILY_PLAN_ACTION_TABLE,
     HABIT_ENTRY_TABLE,
@@ -55,6 +77,9 @@ _DIRECT_EMAIL_TABLES: tuple[str, ...] = (
     CHAT_USAGE_TABLE,
     FEEDBACK_TABLE,
     LOGIN_EVENT_TABLE,
+    CALC_TABLE,
+    CGM_TABLE,
+    NUTRITION_TABLE,
     ADMIN_ROLE_TABLE,
     PROFILE_TABLE,
 )

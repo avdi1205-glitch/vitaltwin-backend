@@ -44,6 +44,7 @@ from ..core.founder_backup_status import get_latest_backup_status, list_backups,
 from ..core.founder_releases import get_latest_release, list_releases, record_release
 from ..core.integrations import get_full_integration_report
 from ..core.plans import get_configured_price_id
+from ..core.plan_service import normalize_plan_row, set_plan_by_email
 from ..core.rate_limit import enforce_rate_limit
 from ..core import stripe_billing
 from ..core.supabase import supabase
@@ -69,6 +70,7 @@ TWIN_MEMORY_TABLE = "vt_twin_memory"
 TWIN_LEARNING_EVENTS_TABLE = "vt_twin_learning_events"
 RECOMMENDATION_FEEDBACK_TABLE = "vt_recommendation_feedback"
 BETA_APPLICATION_TABLE = "vt_beta_applications"
+STRIPE_SUBSCRIPTION_TABLE = "vt_stripe_subscriptions"
 
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 20
@@ -76,6 +78,30 @@ MAX_LIST_LIMIT = 200
 
 ALLOWED_CONTENT_TYPES = {"blog", "faq", "landing_page", "help_page", "notification"}
 ALLOWED_CONTENT_STATUSES = {"draft", "published", "archived"}
+
+# The one, project-wide QA-test-account marker (Admin Control Center §QA
+# Cleanup) — deliberately NOT "email contains 'test'" (far too broad, would
+# risk matching a real user). Both the email prefix AND the full_name
+# marker must match, per the explicit double-safety requirement.
+QA_TEST_EMAIL_PREFIX = "qa-test-"
+QA_TEST_NAME_MARKER = "QA TEST ACCOUNT"
+
+
+def _is_qa_test_account(email: str, full_name: str | None) -> bool:
+    return bool(email) and email.lower().startswith(QA_TEST_EMAIL_PREFIX) and QA_TEST_NAME_MARKER in (full_name or "")
+
+
+def _compute_account_status(*, suspended: bool, deletion_requested_at: str | None) -> str:
+    """Reuses the existing `suspended` boolean (already "deactivate this
+    account" in effect — blocks login, see `routers/users.py::login`) and
+    the existing `deletion_requested_at` (GDPR self-service request) rather
+    than introducing a new status column — deliberately minimal per the
+    admin-improvement task's "keine unnötigen Umbauten"."""
+    if suspended:
+        return "deactivated"
+    if deletion_requested_at:
+        return "deletion_requested"
+    return "active"
 
 
 def _paginate(page: int, page_size: int) -> tuple[int, int]:
@@ -117,6 +143,25 @@ class RoleInput(BaseModel):
 
 class PremiumInput(BaseModel):
     premium: bool
+
+
+class PlanChangeInput(BaseModel):
+    """Explicit administrative tariff change (VitalTwin Plan System) —
+    distinct from Stripe/Beta-Zugang. Never claims this reflects a real
+    Stripe subscription; audited with `trigger: "admin_manual_override"`."""
+
+    plan: str
+
+    @field_validator("plan")
+    @classmethod
+    def _validate_plan(cls, value: str) -> str:
+        if value not in {"free", "premium", "pro", "family"}:
+            raise ValueError("Ungültiger Tarif. Erlaubt: free, premium, pro, family")
+        return value
+
+
+class QACleanupExecuteInput(BaseModel):
+    confirm: bool = False
 
 
 class ReleaseInput(BaseModel):
@@ -347,7 +392,7 @@ async def list_users(
 
     try:
         # Never select `password` — Etappe "Keine Passwörter anzeigen".
-        query = supabase.table(USER_TABLE).select("email,full_name,premium,suspended,created_at", count="exact")
+        query = supabase.table(USER_TABLE).select("email,full_name,premium,plan,suspended,created_at", count="exact")
         if search.strip():
             escaped = search.strip().replace("%", "")
             query = query.or_(f"email.ilike.%{escaped}%,full_name.ilike.%{escaped}%")
@@ -358,9 +403,9 @@ async def list_users(
         users = []
         total = 0
 
-    # Enrich each row with its admin role (if any) and most recent
-    # successful login — bulk-fetched for this page's emails in ONE call
-    # each (not per-row) to avoid an N+1 pattern.
+    # Enrich each row with its admin role (if any), most recent successful
+    # login, and deletion-request timestamp — bulk-fetched for this page's
+    # emails in ONE call each (not per-row) to avoid an N+1 pattern.
     emails = [row["email"] for row in users if row.get("email")]
     if emails:
         def _roles():
@@ -384,21 +429,44 @@ async def list_users(
             except Exception:
                 return []
 
-        role_rows, login_rows = run_parallel(_roles, _last_logins)
+        def _deletion_requests():
+            try:
+                return (
+                    supabase.table(PROFILE_TABLE)
+                    .select("email,deletion_requested_at")
+                    .in_("email", emails)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception:
+                return []
+
+        role_rows, login_rows, deletion_rows = run_parallel(_roles, _last_logins, _deletion_requests)
         role_map = {row["email"]: row["role"] for row in role_rows if row.get("email")}
         last_login_map: dict[str, str] = {}
         for row in login_rows:
             row_email = row.get("email")
             if row_email and row_email not in last_login_map:
                 last_login_map[row_email] = row.get("created_at")
+        deletion_map = {row["email"]: row.get("deletion_requested_at") for row in deletion_rows if row.get("email")}
 
         for user in users:
             user["role"] = role_map.get(user.get("email"))
             user["last_login_at"] = last_login_map.get(user.get("email"))
+            deletion_requested_at = deletion_map.get(user.get("email"))
+            user["deletion_requested_at"] = deletion_requested_at
+            user["plan"] = normalize_plan_row(user)
+            user["status"] = _compute_account_status(
+                suspended=bool(user.get("suspended")), deletion_requested_at=deletion_requested_at
+            )
     else:
         for user in users:
             user["role"] = None
             user["last_login_at"] = None
+            user["deletion_requested_at"] = None
+            user["plan"] = normalize_plan_row(user)
+            user["status"] = _compute_account_status(suspended=bool(user.get("suspended")), deletion_requested_at=None)
 
     return {"items": users, "page": page, "page_size": page_size, "total": total}
 
@@ -411,7 +479,7 @@ async def get_user_detail(email: str, authorization: str | None = Header(default
     try:
         rows = (
             supabase.table(USER_TABLE)
-            .select("id,email,full_name,premium,suspended,suspended_reason,created_at,updated_at")
+            .select("id,email,full_name,premium,plan,suspended,suspended_reason,created_at,updated_at")
             .eq("email", email)
             .limit(1)
             .execute()
@@ -465,12 +533,50 @@ async def get_user_detail(email: str, authorization: str | None = Header(default
         except Exception:
             return []
 
-    consent_rows, role_rows, login_history, last_login_rows = run_parallel(
-        _consents, _role, _recent_logins, _last_successful_login
+    def _deletion_request():
+        try:
+            return (
+                supabase.table(PROFILE_TABLE)
+                .select("deletion_requested_at")
+                .eq("email", email)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _stripe_subscriptions():
+        try:
+            return (
+                supabase.table(STRIPE_SUBSCRIPTION_TABLE)
+                .select("status")
+                .eq("email", email)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    consent_rows, role_rows, login_history, last_login_rows, deletion_rows, subscription_rows = run_parallel(
+        _consents, _role, _recent_logins, _last_successful_login, _deletion_request, _stripe_subscriptions
     )
 
     user = dict(rows[0])
     user["last_login_at"] = last_login_rows[0]["created_at"] if last_login_rows else None
+    deletion_requested_at = deletion_rows[0]["deletion_requested_at"] if deletion_rows else None
+    user["deletion_requested_at"] = deletion_requested_at
+    plan = normalize_plan_row(user)
+    user["plan"] = plan
+    user["status"] = _compute_account_status(suspended=bool(user.get("suspended")), deletion_requested_at=deletion_requested_at)
+    # "Beta-Zugang" isn't a stored flag (no such column exists) — inferred
+    # honestly from real data: a paid-tier account with NO Stripe
+    # subscription row at all can only have gotten there via the free
+    # Beta-Zugang self-service activation (the only other path besides an
+    # admin/founder manually setting the plan) — never fabricated.
+    user["beta_access"] = plan != "free" and not subscription_rows
 
     return {
         "user": user,
@@ -632,6 +738,34 @@ async def set_user_premium(email: str, data: PremiumInput, authorization: str | 
     return {"message": "Premium-Status aktualisiert.", "email": email, "premium": data.premium}
 
 
+@router.post("/users/{email}/plan")
+async def set_user_plan(email: str, data: PlanChangeInput, authorization: str | None = Header(default=None)):
+    """Sets an EXACT tariff (VitalTwin Plan System: free/premium/pro/family)
+    — distinct from the legacy `/premium` boolean toggle above (kept for
+    compatibility, still works for Free vs. any-paid-tier). This is always
+    an explicit, audited, ADMINISTRATIVE change — it never touches Stripe
+    and never pretends to be a real subscription; if the account also has
+    a real Stripe subscription, this manual override does not cancel or
+    modify it (the next Stripe webhook event will still reflect the real
+    subscription state independently)."""
+    admin = require_admin_permission(authorization, "manage_premium")
+    email = email.strip().lower()
+    try:
+        existing = supabase.table(USER_TABLE).select("email").eq("email", email).limit(1).execute().data or []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Nutzer konnte nicht geladen werden.") from exc
+    if not existing:
+        raise HTTPException(status_code=404, detail="Nutzer nicht gefunden.")
+
+    set_plan_by_email(email, data.plan)
+
+    record_audit_event(
+        user_id=None, email=admin.email, action="update", entity_type="user_plan", entity_id=email,
+        metadata={"plan": data.plan, "trigger": "admin_manual_override"},
+    )
+    return {"message": "Tarif administrativ aktualisiert.", "email": email, "plan": data.plan}
+
+
 @router.get("/users/{email}/login-history")
 async def get_user_login_history(email: str, limit: int = 20, authorization: str | None = Header(default=None)):
     require_admin_permission(authorization, "view_login_history")
@@ -679,9 +813,24 @@ async def complete_deletion_request(email: str, authorization: str | None = Head
     """Actually executes an already-requested deletion (irreversible) —
     deletes every row scoped to this email across all user-data tables,
     then the account itself. Never automatic; an admin must trigger this
-    explicitly after reviewing the request."""
+    explicitly after reviewing the request.
+
+    Safety step (Soft-Delete-vor-Hard-Delete workflow): deactivates the
+    account first (same effect as "Account deaktivieren" — blocks login,
+    see `routers/users.py::login`) so no session can keep using the
+    account during/just before the purge, even if an admin skipped the
+    separate manual deactivation step — belt-and-suspenders, not a
+    replacement for that explicit action."""
     admin = require_admin_permission(authorization, "manage_users")
     email = email.strip().lower()
+
+    try:
+        supabase.table(USER_TABLE).update(
+            {"suspended": True, "suspended_at": datetime.now(timezone.utc).isoformat(), "suspended_reason": "Löschung wird abgeschlossen"}
+        ).eq("email", email).execute()
+    except Exception:
+        pass  # best-effort safety step; the purge below is the actual guarantee
+
     deleted_rows = purge_all_user_data(email)
 
     record_audit_event(
@@ -693,6 +842,88 @@ async def complete_deletion_request(email: str, authorization: str | None = Head
         metadata={"deleted_rows": deleted_rows},
     )
     return {"message": "Konto und alle zugehörigen Daten wurden gelöscht.", "email": email, "deleted_rows": deleted_rows}
+
+
+@router.get("/users/qa-cleanup/preview")
+async def preview_qa_cleanup(authorization: str | None = Header(default=None)):
+    """Dry-run for the QA-test-account cleanup (Admin Control Center §QA
+    Cleanup) — lists every account matching the strict, project-defined QA
+    marker WITHOUT deleting anything. Deliberately NOT "email contains
+    'test'" (too broad, could match a real user) — requires the exact
+    `qa-test-` email prefix AND the `QA TEST ACCOUNT` full_name marker,
+    both at once. super_admin only, same severity class as a real hard
+    delete."""
+    admin = require_admin_permission(authorization, "manage_users")
+    if admin.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Nur Super-Admins dürfen QA-Testaccounts bereinigen.")
+
+    try:
+        rows = supabase.table(USER_TABLE).select("email,full_name,created_at").execute().data or []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Nutzerliste konnte nicht geladen werden.") from exc
+
+    matches = [row for row in rows if _is_qa_test_account(row.get("email", ""), row.get("full_name"))]
+    return {"count": len(matches), "items": matches}
+
+
+@router.post("/users/qa-cleanup/execute")
+async def execute_qa_cleanup(data: QACleanupExecuteInput, authorization: str | None = Header(default=None)):
+    """Actually removes every account matching the strict QA marker (see
+    `preview_qa_cleanup` above for the exact rule) — requires `confirm:
+    true` explicitly (the frontend must have shown the dry-run list to the
+    admin first). Reuses `purge_all_user_data` — the SAME deletion
+    implementation as the real GDPR flow, not a second parallel one. Any
+    matched row that also holds an admin role is skipped (defense in
+    depth — a real admin account should never match the QA pattern, but
+    this makes sure a wildcard-like mistake can't ever remove one)."""
+    admin = require_admin_permission(authorization, "manage_users")
+    if admin.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Nur Super-Admins dürfen QA-Testaccounts bereinigen.")
+    if not data.confirm:
+        raise HTTPException(status_code=400, detail="Bestätigung erforderlich (confirm=true).")
+
+    try:
+        rows = supabase.table(USER_TABLE).select("email,full_name").execute().data or []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Nutzerliste konnte nicht geladen werden.") from exc
+
+    matches = [row for row in rows if _is_qa_test_account(row.get("email", ""), row.get("full_name"))]
+
+    try:
+        admin_role_rows = supabase.table(ADMIN_ROLE_TABLE).select("email").execute().data or []
+        admin_emails = {row["email"] for row in admin_role_rows if row.get("email")}
+    except Exception:
+        admin_emails = set()
+
+    results: list[dict[str, object]] = []
+    succeeded = 0
+    for row in matches:
+        row_email = row["email"]
+        if row_email in admin_emails:
+            results.append({"email": row_email, "success": False, "error": "Übersprungen: Konto hat eine Admin-Rolle."})
+            continue
+        try:
+            deleted_rows = purge_all_user_data(row_email)
+            if not deleted_rows.get(USER_TABLE):
+                results.append({"email": row_email, "success": False, "error": "Konto nicht gefunden (evtl. bereits gelöscht)."})
+                continue
+            succeeded += 1
+            results.append({"email": row_email, "success": True, "deleted_rows": deleted_rows})
+        except Exception as exc:
+            results.append({"email": row_email, "success": False, "error": str(exc)})
+
+    failed = len(matches) - succeeded
+    record_audit_event(
+        user_id=None,
+        email=admin.email,
+        action="delete",
+        entity_type="qa_cleanup",
+        entity_id=None,
+        metadata={"attempted": len(matches), "succeeded": succeeded, "failed": failed},
+    )
+
+    summary = f"{succeeded} QA-Testaccounts erfolgreich bereinigt" + (f", {failed} fehlgeschlagen" if failed else "")
+    return {"message": summary, "attempted": len(matches), "succeeded": succeeded, "failed": failed, "results": results}
 
 
 # ---------------------------------------------------------------------------

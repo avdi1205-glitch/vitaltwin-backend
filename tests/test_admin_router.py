@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from app.core.admin_rbac import AdminPrincipal
 from app.core import ai_usage_logger, error_events, founder_backup_status, founder_releases, stripe_billing
 from app.routers import admin as admin_module
-from app.routers.admin import BackupInput, ContentInput, PremiumInput, ReleaseInput, RoleInput, SuspendInput
+from app.routers.admin import BackupInput, ContentInput, PlanChangeInput, PremiumInput, QACleanupExecuteInput, ReleaseInput, RoleInput, SuspendInput
 
 
 @pytest.fixture
@@ -330,6 +330,55 @@ class TestListUsers:
         assert result["items"][0]["role"] is None
         assert result["items"][0]["last_login_at"] is None
 
+    @pytest.mark.anyio
+    async def test_shows_real_plan_not_derived_from_legacy_premium_when_plan_present(self, fake_supabase, permission_spy):
+        """VitalTwin Plan System: a `pro` account must display as `pro`,
+        never collapsed to the legacy `premium` boolean's true/false."""
+        fake_supabase.store["vt_users"] = {
+            "data": [{"email": "user@example.com", "full_name": "User", "premium": True, "plan": "pro", "suspended": False}]
+        }
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": []}
+        result = await admin_module.list_users(authorization="Bearer x")
+        assert result["items"][0]["plan"] == "pro"
+        assert result["items"][0]["status"] == "active"
+
+    @pytest.mark.anyio
+    async def test_falls_back_to_legacy_premium_boolean_when_plan_missing(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {
+            "data": [{"email": "legacy@example.com", "full_name": "Legacy", "premium": True, "suspended": False}]
+        }
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": []}
+        result = await admin_module.list_users(authorization="Bearer x")
+        assert result["items"][0]["plan"] == "premium"
+
+    @pytest.mark.anyio
+    async def test_status_is_deactivated_when_suspended(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {
+            "data": [{"email": "user@example.com", "full_name": "User", "premium": False, "plan": "free", "suspended": True}]
+        }
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": []}
+        result = await admin_module.list_users(authorization="Bearer x")
+        assert result["items"][0]["status"] == "deactivated"
+
+    @pytest.mark.anyio
+    async def test_status_is_deletion_requested_when_flagged(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {
+            "data": [{"email": "user@example.com", "full_name": "User", "premium": False, "plan": "free", "suspended": False}]
+        }
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {
+            "data": [{"email": "user@example.com", "deletion_requested_at": "2026-08-08T00:00:00Z"}]
+        }
+        result = await admin_module.list_users(authorization="Bearer x")
+        assert result["items"][0]["status"] == "deletion_requested"
+
 
 class TestGetUserDetail:
     @pytest.mark.anyio
@@ -364,6 +413,64 @@ class TestGetUserDetail:
         result = await admin_module.get_user_detail("user@example.com", authorization="Bearer x")
         assert result["user"]["last_login_at"] is None
         assert result["user"]["id"] == 1
+
+    @pytest.mark.anyio
+    async def test_shows_real_plan_and_deletion_status(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {
+            "data": [{"id": 1, "email": "user@example.com", "full_name": "User", "premium": True, "plan": "family", "suspended": False}]
+        }
+        fake_supabase.store["vt_consent_records"] = {"data": []}
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": [{"deletion_requested_at": "2026-08-08T00:00:00Z"}]}
+        fake_supabase.store["vt_stripe_subscriptions"] = {"data": []}
+
+        result = await admin_module.get_user_detail("user@example.com", authorization="Bearer x")
+        assert result["user"]["plan"] == "family"
+        assert result["user"]["status"] == "deletion_requested"
+        assert result["user"]["deletion_requested_at"] == "2026-08-08T00:00:00Z"
+
+    @pytest.mark.anyio
+    async def test_beta_access_true_when_paid_plan_but_no_stripe_subscription(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {
+            "data": [{"id": 1, "email": "user@example.com", "full_name": "User", "premium": True, "plan": "premium", "suspended": False}]
+        }
+        fake_supabase.store["vt_consent_records"] = {"data": []}
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": []}
+        fake_supabase.store["vt_stripe_subscriptions"] = {"data": []}
+
+        result = await admin_module.get_user_detail("user@example.com", authorization="Bearer x")
+        assert result["user"]["beta_access"] is True
+
+    @pytest.mark.anyio
+    async def test_beta_access_false_when_a_real_stripe_subscription_exists(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {
+            "data": [{"id": 1, "email": "user@example.com", "full_name": "User", "premium": True, "plan": "premium", "suspended": False}]
+        }
+        fake_supabase.store["vt_consent_records"] = {"data": []}
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": []}
+        fake_supabase.store["vt_stripe_subscriptions"] = {"data": [{"status": "active"}]}
+
+        result = await admin_module.get_user_detail("user@example.com", authorization="Bearer x")
+        assert result["user"]["beta_access"] is False
+
+    @pytest.mark.anyio
+    async def test_beta_access_false_for_free_plan(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {
+            "data": [{"id": 1, "email": "user@example.com", "full_name": "User", "premium": False, "plan": "free", "suspended": False}]
+        }
+        fake_supabase.store["vt_consent_records"] = {"data": []}
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": []}
+        fake_supabase.store["vt_stripe_subscriptions"] = {"data": []}
+
+        result = await admin_module.get_user_detail("user@example.com", authorization="Bearer x")
+        assert result["user"]["beta_access"] is False
 
 
 class TestDeletionRequests:
@@ -564,6 +671,134 @@ class TestPremiumManagement:
         assert result["premium"] is True
         assert recorded_audit_events[-1]["entity_type"] == "user_premium"
         assert recorded_audit_events[-1]["metadata"]["premium"] is True
+
+
+class TestSetUserPlan:
+    def test_rejects_unknown_plan_value(self):
+        with pytest.raises(Exception):
+            PlanChangeInput(plan="enterprise")
+
+    @pytest.mark.anyio
+    async def test_404_when_user_not_found(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {"data": []}
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.set_user_plan("nobody@example.com", PlanChangeInput(plan="pro"), authorization="Bearer x")
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_success_calls_set_plan_by_email_and_records_audit_event(
+        self, monkeypatch, fake_supabase, permission_spy, recorded_audit_events
+    ):
+        fake_supabase.store["vt_users"] = {"data": [{"email": "user@example.com"}]}
+        calls: list[tuple] = []
+        monkeypatch.setattr(admin_module, "set_plan_by_email", lambda email, plan: calls.append((email, plan)))
+
+        result = await admin_module.set_user_plan("user@example.com", PlanChangeInput(plan="family"), authorization="Bearer x")
+
+        assert calls == [("user@example.com", "family")]
+        assert result["plan"] == "family"
+        assert recorded_audit_events[-1]["entity_type"] == "user_plan"
+        assert recorded_audit_events[-1]["metadata"] == {"plan": "family", "trigger": "admin_manual_override"}
+
+
+class TestQACleanup:
+    @pytest.mark.anyio
+    async def test_preview_requires_super_admin(self, monkeypatch, fake_supabase):
+        non_super_admin = AdminPrincipal(email="support@example.com", role="support")
+        monkeypatch.setattr(admin_module, "require_admin_permission", lambda authorization, permission: non_super_admin)
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.preview_qa_cleanup(authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_preview_only_matches_the_strict_qa_pattern(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {
+            "data": [
+                {"email": "qa-test-plan-free-20260808@vitaltwin.de", "full_name": "QA TEST ACCOUNT - PLAN FREE", "created_at": "2026-08-08"},
+                {"email": "real.customer@example.com", "full_name": "Real Customer", "created_at": "2026-01-01"},
+                # email prefix matches but name marker is missing -> must NOT match (double-safety)
+                {"email": "qa-test-suspicious@vitaltwin.de", "full_name": "Not a QA marker", "created_at": "2026-08-08"},
+                # name marker present but email prefix missing -> must NOT match either
+                {"email": "someone@example.com", "full_name": "QA TEST ACCOUNT - fake", "created_at": "2026-08-08"},
+            ]
+        }
+        result = await admin_module.preview_qa_cleanup(authorization="Bearer x")
+        assert result["count"] == 1
+        assert result["items"][0]["email"] == "qa-test-plan-free-20260808@vitaltwin.de"
+
+    @pytest.mark.anyio
+    async def test_execute_requires_super_admin(self, monkeypatch, fake_supabase):
+        non_super_admin = AdminPrincipal(email="support@example.com", role="support")
+        monkeypatch.setattr(admin_module, "require_admin_permission", lambda authorization, permission: non_super_admin)
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.execute_qa_cleanup(QACleanupExecuteInput(confirm=True), authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_execute_requires_explicit_confirm(self, fake_supabase, permission_spy):
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.execute_qa_cleanup(QACleanupExecuteInput(confirm=False), authorization="Bearer x")
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.anyio
+    async def test_execute_deletes_only_matching_accounts_and_reports_summary(
+        self, monkeypatch, fake_supabase, permission_spy, recorded_audit_events
+    ):
+        fake_supabase.store["vt_users"] = {
+            "data": [
+                {"email": "qa-test-a@vitaltwin.de", "full_name": "QA TEST ACCOUNT - A"},
+                {"email": "qa-test-b@vitaltwin.de", "full_name": "QA TEST ACCOUNT - B"},
+                {"email": "real.customer@example.com", "full_name": "Real Customer"},
+            ]
+        }
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        purge_calls: list[str] = []
+
+        def _fake_purge(email):
+            purge_calls.append(email)
+            if email == "qa-test-b@vitaltwin.de":
+                raise RuntimeError("boom")
+            return {"vt_users": 1}
+
+        monkeypatch.setattr(admin_module, "purge_all_user_data", _fake_purge)
+
+        result = await admin_module.execute_qa_cleanup(QACleanupExecuteInput(confirm=True), authorization="Bearer x")
+
+        assert set(purge_calls) == {"qa-test-a@vitaltwin.de", "qa-test-b@vitaltwin.de"}
+        assert "real.customer@example.com" not in purge_calls
+        assert result["succeeded"] == 1
+        assert result["failed"] == 1
+        assert result["message"] == "1 QA-Testaccounts erfolgreich bereinigt, 1 fehlgeschlagen"
+        assert recorded_audit_events[-1]["entity_type"] == "qa_cleanup"
+
+    @pytest.mark.anyio
+    async def test_execute_never_touches_a_normal_user_even_with_matching_email_prefix_alone(
+        self, monkeypatch, fake_supabase, permission_spy
+    ):
+        """The double-safety rule: email prefix ALONE is not enough."""
+        fake_supabase.store["vt_users"] = {
+            "data": [{"email": "qa-test-looks-like-a-real-user@vitaltwin.de", "full_name": "Kein QA-Marker im Namen"}]
+        }
+        purge_calls: list[str] = []
+        monkeypatch.setattr(admin_module, "purge_all_user_data", lambda email: purge_calls.append(email) or {"vt_users": 1})
+
+        result = await admin_module.execute_qa_cleanup(QACleanupExecuteInput(confirm=True), authorization="Bearer x")
+
+        assert purge_calls == []
+        assert result["attempted"] == 0
+
+    @pytest.mark.anyio
+    async def test_execute_skips_accounts_with_an_admin_role(self, monkeypatch, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {"data": [{"email": "qa-test-admin@vitaltwin.de", "full_name": "QA TEST ACCOUNT - admin"}]}
+        fake_supabase.store["vt_admin_roles"] = {"data": [{"email": "qa-test-admin@vitaltwin.de"}]}
+        purge_calls: list[str] = []
+        monkeypatch.setattr(admin_module, "purge_all_user_data", lambda email: purge_calls.append(email) or {"vt_users": 1})
+
+        result = await admin_module.execute_qa_cleanup(QACleanupExecuteInput(confirm=True), authorization="Bearer x")
+
+        assert purge_calls == []
+        assert result["succeeded"] == 0
+        assert result["results"][0]["success"] is False
 
 
 # ---------------------------------------------------------------------------
