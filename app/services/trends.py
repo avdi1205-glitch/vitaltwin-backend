@@ -38,12 +38,20 @@ def compute_trend(
     field: str,
     window_days: int,
     today: date,
+    end_date: date | None = None,
 ) -> TrendResult:
     """Average of `field` across `entries` whose `entry_date` falls within
-    the last `window_days` days (inclusive of today). `entries` is expected
-    to already be scoped to a single user (server-side, see `routers/profile.py`).
+    the last `window_days` days up to `end_date` (inclusive). `entries` is
+    expected to already be scoped to a single user (server-side, see
+    `routers/profile.py`).
+
+    `end_date` defaults to `today` (existing behavior, unchanged for every
+    current caller) — passing an earlier `end_date` computes a PRECEDING
+    window instead, e.g. for a baseline period that must not overlap with a
+    more recent comparison window (see `services/personal_baseline.py`).
     """
-    window_start = today - timedelta(days=window_days - 1)
+    window_end = end_date or today
+    window_start = window_end - timedelta(days=window_days - 1)
     values: list[float] = []
 
     for entry in entries:
@@ -51,12 +59,13 @@ def compute_trend(
         if not raw_date:
             continue
         entry_date = raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date))
-        if not (window_start <= entry_date <= today):
+        if not (window_start <= entry_date <= window_end):
             continue
         value = entry.get(field)
         if value is None:
             continue
         values.append(float(value))
+
 
     if not values:
         return TrendResult(field=field, window_days=window_days, average=None, data_points=0, data_quality="missing")

@@ -21,6 +21,7 @@ from ..core.validation import (
     validate_sleep_hours,
 )
 from ..services.habit_service import compute_habit_stats
+from ..services.personal_baseline import build_personal_baseline_report
 from ..services.privacy_export import count_total_export_rows, exceeds_sync_export_limit
 from ..services.trends import compute_trend
 
@@ -672,6 +673,30 @@ async def get_trends(authorization: str | None = Header(default=None)):
         "keine medizinische Bewertung und keine Diagnose."
     )}
 
+@router.get("/baseline")
+async def get_personal_baseline(authorization: str | None = Header(default=None)):
+    """Personal Baseline Engine (VitalTwin Mehrwert Phase 1): compares the
+    last 7 days against the user's own 28-day baseline for sleep duration,
+    steps, and movement minutes — the only fields currently backed by real
+    stored data (see `services/personal_baseline.py` docstring for why
+    bedtime/heart rate/weight are not included yet). Reuses the same
+    entries-loading pattern as `/trends`."""
+    email = _require_email(authorization)
+
+    try:
+        response = (
+            supabase.table(DAILY_ENTRY_TABLE)
+            .select("*")
+            .eq("email", email)
+            .order("entry_date", desc=True)
+            .limit(90)
+            .execute()
+        )
+        entries = response.data or []
+    except Exception:
+        entries = []
+
+    return build_personal_baseline_report(entries, date.today())
 
 @router.get("/habits")
 async def list_habits(authorization: str | None = Header(default=None)):
