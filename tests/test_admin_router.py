@@ -58,6 +58,10 @@ class _FakeQuery:
         self._record("or_", *args, **kwargs)
         return self
 
+    def in_(self, *args, **kwargs):
+        self._record("in_", *args, **kwargs)
+        return self
+
     def order(self, *args, **kwargs):
         self._record("order", *args, **kwargs)
         return self
@@ -303,6 +307,29 @@ class TestListUsers:
         result = await admin_module.list_users(authorization="Bearer x")
         assert result == {"items": [], "page": 1, "page_size": admin_module.DEFAULT_PAGE_SIZE, "total": 0}
 
+    @pytest.mark.anyio
+    async def test_enriches_rows_with_role_and_last_login(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {"data": [{"email": "user@example.com", "full_name": "User"}]}
+        fake_supabase.store["vt_admin_roles"] = {"data": [{"email": "user@example.com", "role": "support"}]}
+        fake_supabase.store["vt_login_events"] = {
+            "data": [
+                {"email": "user@example.com", "created_at": "2026-08-07T00:00:00Z"},
+                {"email": "user@example.com", "created_at": "2026-08-01T00:00:00Z"},
+            ]
+        }
+        result = await admin_module.list_users(authorization="Bearer x")
+        assert result["items"][0]["role"] == "support"
+        assert result["items"][0]["last_login_at"] == "2026-08-07T00:00:00Z"
+
+    @pytest.mark.anyio
+    async def test_role_and_last_login_are_null_when_absent(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {"data": [{"email": "user@example.com", "full_name": "User"}]}
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        result = await admin_module.list_users(authorization="Bearer x")
+        assert result["items"][0]["role"] is None
+        assert result["items"][0]["last_login_at"] is None
+
 
 class TestGetUserDetail:
     @pytest.mark.anyio
@@ -325,6 +352,18 @@ class TestGetUserDetail:
         assert result["admin_role"] == "support"
         assert result["recent_logins"] == [{"success": True, "created_at": "2024-01-01"}]
         assert "consents" in result
+        assert result["user"]["last_login_at"] == "2024-01-01"
+
+    @pytest.mark.anyio
+    async def test_last_login_at_is_null_when_no_successful_login_exists(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {"data": [{"id": 1, "email": "user@example.com", "full_name": "User"}]}
+        fake_supabase.store["vt_consent_records"] = {"data": []}
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+
+        result = await admin_module.get_user_detail("user@example.com", authorization="Bearer x")
+        assert result["user"]["last_login_at"] is None
+        assert result["user"]["id"] == 1
 
 
 class TestDeletionRequests:
@@ -407,6 +446,19 @@ class TestDirectUserDeletion:
             await admin_module.delete_user("nobody@example.com", authorization="Bearer x")
         assert exc_info.value.status_code == 404
 
+    @pytest.mark.anyio
+    async def test_refuses_when_actor_is_not_super_admin(self, monkeypatch, fake_supabase):
+        """A real hard delete is higher-stakes than suspend/premium — even
+        though `admin`/`support` also hold `manage_users`, only an actor
+        whose OWN role is super_admin may perform it."""
+        non_super_admin = AdminPrincipal(email="support@example.com", role="support")
+        monkeypatch.setattr(admin_module, "require_admin_permission", lambda authorization, permission: non_super_admin)
+        monkeypatch.setattr(admin_module, "purge_all_user_data", lambda email: {"vt_users": 1})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.delete_user("user@example.com", authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
 
 class TestSuspendUnsuspend:
     @pytest.mark.anyio
@@ -475,6 +527,26 @@ class TestRoleManagement:
         assert fake_supabase.store["vt_admin_roles"]["deleted"] is True
         assert recorded_audit_events[-1]["action"] == "delete"
         assert recorded_audit_events[-1]["entity_type"] == "admin_role"
+
+    @pytest.mark.anyio
+    async def test_refuses_to_demote_the_last_super_admin(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_admin_roles"] = {"data": [{"id": "existing-id", "role": "super_admin"}], "count": 0}
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.set_user_role("founder@example.com", RoleInput(role="admin"), authorization="Bearer x")
+        assert exc_info.value.status_code == 409
+
+    @pytest.mark.anyio
+    async def test_allows_demoting_a_super_admin_when_another_remains(self, fake_supabase, permission_spy, recorded_audit_events):
+        fake_supabase.store["vt_admin_roles"] = {"data": [{"id": "existing-id", "role": "super_admin"}], "count": 1}
+        result = await admin_module.set_user_role("founder@example.com", RoleInput(role="admin"), authorization="Bearer x")
+        assert result["role"] == "admin"
+
+    @pytest.mark.anyio
+    async def test_refuses_to_remove_the_last_super_admins_role(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_admin_roles"] = {"data": [{"role": "super_admin"}], "count": 0}
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.remove_user_role("founder@example.com", authorization="Bearer x")
+        assert exc_info.value.status_code == 409
 
 
 class TestPremiumManagement:

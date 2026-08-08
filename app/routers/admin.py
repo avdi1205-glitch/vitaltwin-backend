@@ -323,6 +323,21 @@ async def admin_dashboard(authorization: str | None = Header(default=None)):
 # ---------------------------------------------------------------------------
 
 
+def _count_super_admins(exclude_email: str | None = None) -> int:
+    """Best-effort count of remaining super_admin rows, used to block a
+    role change/removal that would leave the platform with zero
+    super-admins. Fails closed (returns 0) on any DB error so an
+    unexpected failure blocks the action instead of silently allowing an
+    accidental lockout."""
+    try:
+        query = supabase.table(ADMIN_ROLE_TABLE).select("email", count="exact").eq("role", "super_admin")
+        if exclude_email:
+            query = query.neq("email", exclude_email)
+        return query.execute().count or 0
+    except Exception:
+        return 0
+
+
 @router.get("/users")
 async def list_users(
     search: str = "", page: int = 1, page_size: int = DEFAULT_PAGE_SIZE, authorization: str | None = Header(default=None)
@@ -343,6 +358,48 @@ async def list_users(
         users = []
         total = 0
 
+    # Enrich each row with its admin role (if any) and most recent
+    # successful login — bulk-fetched for this page's emails in ONE call
+    # each (not per-row) to avoid an N+1 pattern.
+    emails = [row["email"] for row in users if row.get("email")]
+    if emails:
+        def _roles():
+            try:
+                return supabase.table(ADMIN_ROLE_TABLE).select("email,role").in_("email", emails).execute().data or []
+            except Exception:
+                return []
+
+        def _last_logins():
+            try:
+                return (
+                    supabase.table(LOGIN_EVENT_TABLE)
+                    .select("email,created_at")
+                    .in_("email", emails)
+                    .eq("success", True)
+                    .order("created_at", desc=True)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception:
+                return []
+
+        role_rows, login_rows = run_parallel(_roles, _last_logins)
+        role_map = {row["email"]: row["role"] for row in role_rows if row.get("email")}
+        last_login_map: dict[str, str] = {}
+        for row in login_rows:
+            row_email = row.get("email")
+            if row_email and row_email not in last_login_map:
+                last_login_map[row_email] = row.get("created_at")
+
+        for user in users:
+            user["role"] = role_map.get(user.get("email"))
+            user["last_login_at"] = last_login_map.get(user.get("email"))
+    else:
+        for user in users:
+            user["role"] = None
+            user["last_login_at"] = None
+
     return {"items": users, "page": page, "page_size": page_size, "total": total}
 
 
@@ -354,7 +411,7 @@ async def get_user_detail(email: str, authorization: str | None = Header(default
     try:
         rows = (
             supabase.table(USER_TABLE)
-            .select("email,full_name,premium,suspended,suspended_reason,created_at,updated_at")
+            .select("id,email,full_name,premium,suspended,suspended_reason,created_at,updated_at")
             .eq("email", email)
             .limit(1)
             .execute()
@@ -365,32 +422,58 @@ async def get_user_detail(email: str, authorization: str | None = Header(default
     if not rows:
         raise HTTPException(status_code=404, detail="Nutzer nicht gefunden.")
 
-    try:
-        consent_rows = supabase.table(CONSENT_TABLE).select("*").eq("email", email).execute().data or []
-    except Exception:
-        consent_rows = []
+    def _consents():
+        try:
+            return supabase.table(CONSENT_TABLE).select("*").eq("email", email).execute().data or []
+        except Exception:
+            return []
 
-    try:
-        role_rows = supabase.table(ADMIN_ROLE_TABLE).select("role").eq("email", email).limit(1).execute().data or []
-    except Exception:
-        role_rows = []
+    def _role():
+        try:
+            return supabase.table(ADMIN_ROLE_TABLE).select("role").eq("email", email).limit(1).execute().data or []
+        except Exception:
+            return []
 
-    try:
-        login_history = (
-            supabase.table(LOGIN_EVENT_TABLE)
-            .select("success,ip_address,created_at")
-            .eq("email", email)
-            .order("created_at", desc=True)
-            .limit(10)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        login_history = []
+    def _recent_logins():
+        try:
+            return (
+                supabase.table(LOGIN_EVENT_TABLE)
+                .select("success,ip_address,created_at")
+                .eq("email", email)
+                .order("created_at", desc=True)
+                .limit(10)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _last_successful_login():
+        try:
+            return (
+                supabase.table(LOGIN_EVENT_TABLE)
+                .select("created_at")
+                .eq("email", email)
+                .eq("success", True)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    consent_rows, role_rows, login_history, last_login_rows = run_parallel(
+        _consents, _role, _recent_logins, _last_successful_login
+    )
+
+    user = dict(rows[0])
+    user["last_login_at"] = last_login_rows[0]["created_at"] if last_login_rows else None
 
     return {
-        "user": rows[0],
+        "user": user,
         "consents": resolve_current_consents(consent_rows),
         "admin_role": role_rows[0]["role"] if role_rows else None,
         "recent_logins": login_history,
@@ -406,8 +489,14 @@ async def delete_user(email: str, authorization: str | None = Header(default=Non
     that. Reuses the same `purge_all_user_data()` used by the GDPR flow —
     one deletion implementation, not two. Deleting the row from `vt_users`
     structurally prevents any further login (auth checks that table
-    directly), no separate "disabled" flag needed."""
+    directly), no separate "disabled" flag needed.
+
+    Restricted to super_admin actors specifically (not just anyone with the
+    `manage_users` permission, which admin/support also hold) — a real,
+    irreversible hard delete is a higher-stakes action than suspend/premium."""
     admin = require_admin_permission(authorization, "manage_users")
+    if admin.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Nur Super-Admins dürfen Nutzer endgültig löschen.")
     email = email.strip().lower()
 
     try:
@@ -481,7 +570,15 @@ async def set_user_role(email: str, data: RoleInput, authorization: str | None =
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        existing = supabase.table(ADMIN_ROLE_TABLE).select("id").eq("email", email).limit(1).execute().data
+        existing = supabase.table(ADMIN_ROLE_TABLE).select("id,role").eq("email", email).limit(1).execute().data
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Rolle konnte nicht gesetzt werden.") from exc
+
+    current_role = existing[0].get("role") if existing else None
+    if current_role == "super_admin" and data.role != "super_admin" and _count_super_admins(exclude_email=email) < 1:
+        raise HTTPException(status_code=409, detail="Der letzte Super-Admin kann nicht herabgestuft werden.")
+
+    try:
         if existing:
             supabase.table(ADMIN_ROLE_TABLE).update({"role": data.role, "updated_at": now}).eq("email", email).execute()
         else:
@@ -502,6 +599,15 @@ async def set_user_role(email: str, data: RoleInput, authorization: str | None =
 async def remove_user_role(email: str, authorization: str | None = Header(default=None)):
     admin = require_admin_permission(authorization, "manage_roles")
     email = email.strip().lower()
+
+    try:
+        existing = supabase.table(ADMIN_ROLE_TABLE).select("role").eq("email", email).limit(1).execute().data or []
+    except Exception:
+        existing = []
+
+    if existing and existing[0].get("role") == "super_admin" and _count_super_admins(exclude_email=email) < 1:
+        raise HTTPException(status_code=409, detail="Der letzte Super-Admin kann nicht entfernt werden.")
+
     try:
         supabase.table(ADMIN_ROLE_TABLE).delete().eq("email", email).execute()
     except Exception as exc:
