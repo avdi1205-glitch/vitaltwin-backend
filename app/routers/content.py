@@ -31,7 +31,7 @@ async def list_published_blog_posts(page: int = 1, page_size: int = DEFAULT_PAGE
     try:
         response = (
             supabase.table(CONTENT_TABLE)
-            .select("slug,title,body,published_at,updated_at", count="exact")
+            .select("slug,title,body,excerpt,published_at,updated_at", count="exact")
             .eq("content_type", "blog")
             .eq("status", "published")
             .order("published_at", desc=True)
@@ -52,7 +52,7 @@ async def get_published_blog_post(slug: str):
     try:
         rows = (
             supabase.table(CONTENT_TABLE)
-            .select("slug,title,body,published_at,updated_at")
+            .select("slug,title,body,excerpt,published_at,updated_at")
             .eq("content_type", "blog")
             .eq("status", "published")
             .eq("slug", slug)
