@@ -132,4 +132,11 @@ def purge_all_user_data(email: str) -> dict[str, int | None]:
     except Exception:
         deleted[USER_TABLE] = None
 
+    # A deleted account must not still be able to log in via a stale
+    # in-process cache entry (`routers/users.py::users_store`) — see
+    # `invalidate_cached_user`'s docstring for the real bug this closes.
+    from ..routers.users import invalidate_cached_user  # local import: breaks core<->routers cycle
+
+    invalidate_cached_user(email)
+
     return deleted

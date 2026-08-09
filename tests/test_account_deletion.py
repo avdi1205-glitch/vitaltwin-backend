@@ -155,3 +155,23 @@ def test_purge_reports_none_on_table_failure_not_fabricated_zero(monkeypatch):
 
     result = account_deletion.purge_all_user_data("user-a@example.com")
     assert result[account_deletion.HABIT_TABLE] is None
+
+
+def test_purge_evicts_the_deleted_email_from_the_in_process_login_cache(monkeypatch):
+    """Regression test: a deleted account could still log in successfully
+    because `routers/users.py::_get_user`'s in-process cache (`users_store`)
+    was never invalidated on deletion — a stale cached password hash kept
+    authenticating a user whose `vt_users` row no longer existed (found
+    live: a purged QA test account still logged in after cleanup)."""
+    from app.routers import users as users_module
+
+    email = "user-a@example.com"
+    users_module.users_store[email] = {"password": "stale-hash", "full_name": "Stale Cached User", "premium": False, "plan": "free"}
+
+    tables = {account_deletion.USER_TABLE: [{"email": email}]}
+    fake = _FakeSupabase(tables)
+    monkeypatch.setattr(account_deletion, "supabase", fake)
+
+    account_deletion.purge_all_user_data(email)
+
+    assert email not in users_module.users_store

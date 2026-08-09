@@ -393,6 +393,19 @@ def sync_cached_plan(email: str, plan: str) -> None:
         user["premium"] = plan != "free"
 
 
+def invalidate_cached_user(email: str) -> None:
+    """Evicts `email` from the in-process `users_store` cache — must be
+    called whenever an account is actually deleted (GDPR self-service,
+    admin hard-delete, QA cleanup — all go through
+    `core/account_deletion.py::purge_all_user_data`). Without this, a
+    deleted account could still log in successfully: `_get_user`'s
+    cache-hit path never re-checks the DB, so a stale cached password hash
+    would keep authenticating a user whose `vt_users` row no longer
+    exists — a real bug found live (a "deleted" QA test account still
+    logged in successfully after the row was gone from the database)."""
+    users_store.pop(email.strip().lower(), None)
+
+
 def set_password_by_email(email: str, password: str) -> bool:
     normalized_email = email.lower()
     user = _get_user(normalized_email)
