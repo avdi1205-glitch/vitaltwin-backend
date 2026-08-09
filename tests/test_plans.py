@@ -8,12 +8,15 @@ from app.core.plans import get_chat_daily_limit, get_context_char_limit
 
 
 class TestChatDailyLimit:
-    @pytest.mark.parametrize("plan,expected", [("free", 3), ("premium", 30), ("pro", 60), ("family", 30)])
+    @pytest.mark.parametrize("plan,expected", [("free", 3), ("premium", 30), ("pro", 60), ("family", 60)])
     def test_known_plans_have_expected_limits(self, plan, expected):
         assert get_chat_daily_limit(plan) == expected
 
     def test_unknown_plan_falls_back_to_free(self):
         assert get_chat_daily_limit("not-a-real-plan") == get_chat_daily_limit("free")
+
+    def test_family_matches_pro(self):
+        assert get_chat_daily_limit("family") == get_chat_daily_limit("pro")
 
 
 class TestContextCharLimit:

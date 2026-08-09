@@ -81,15 +81,16 @@ PLAN_FEATURES: dict[str, dict[str, object]] = {
 # Concrete daily "Frag deinen Twin" chat message caps per plan (Block 6).
 # PLAN_FEATURES above describes premium/pro/family as "fair-unlimited" for
 # marketing purposes, but a real numeric ceiling is required server-side to
-# keep AI provider costs bounded. Note: the database currently only stores a
-# boolean `premium` flag (see Block 3 open items), so pro/family accounts are
-# indistinguishable from premium today and get the same limit until a real
-# `plan` field exists.
+# keep AI provider costs bounded. FAMILY matches PRO here (both 60/day) —
+# Family's own multi-profile/family-goal features are still `coming_soon`
+# (no backend infrastructure exists for them yet), but the general,
+# already-usable Pro-level benefits (like this AI question limit) must not
+# be worse for Family than for the cheaper Pro tier.
 CHAT_DAILY_LIMITS: dict[str, int] = {
     "free": 3,
     "premium": 30,
     "pro": 60,
-    "family": 30,
+    "family": 60,
 }
 
 
