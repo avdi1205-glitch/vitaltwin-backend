@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from ..core.supabase import supabase
 from ..core.rate_limit import enforce_rate_limit
+from ..core.plan_service import get_plan_by_email
 
 router = APIRouter()
 
@@ -466,11 +467,18 @@ async def login(req: LoginRequest, request: Request):
     token = _create_access_token(email)
     _record_login_event(email=email, success=True, request=request)
 
+    # Real, uncached read (see `core/plan_service.py::get_plan_by_email`) —
+    # `user` here can be a stale in-process cache entry (`_get_user`'s
+    # `users_store`) that no longer matches the DB after an out-of-process
+    # plan change (admin Tarif-Wechsel, Stripe webhook); the login response
+    # must never show a premium/plan value that disagrees with what
+    # `/api/chat/status` and `/api/profile/trends` actually enforce.
+    plan = get_plan_by_email(email)
     return {
         "access_token": token,
         "message": "Login erfolgreich",
         "email": email,
-        "premium": bool(user.get("premium", False)),
+        "premium": plan != "free",
     }
 
 
@@ -496,12 +504,13 @@ async def google_login(req: GoogleLoginRequest):
 
     token = _create_access_token(email)
 
-    plan = str(user.get("plan") or ("premium" if user.get("premium") else "free"))
+    # Real, uncached read — see the same comment in `/login` above.
+    plan = get_plan_by_email(email)
     return {
         "access_token": token,
         "message": "Login erfolgreich",
         "email": email,
-        "premium": bool(user.get("premium", False)),
+        "premium": plan != "free",
         "plan": plan,
     }
 
@@ -549,8 +558,15 @@ async def me(authorization: str | None = Header(default=None)):
     if not user:
         raise HTTPException(status_code=404, detail="User nicht gefunden")
 
-    premium = bool(user.get("premium", False))
-    plan = str(user.get("plan") or ("premium" if premium else "free"))
+    # Real, uncached read (see `core/plan_service.py::get_plan_by_email`) —
+    # `user` (from `_get_user`'s in-process cache) can silently disagree
+    # with the DB after an out-of-process plan change, exactly the source
+    # of a real bug found live: the dashboard's Plan badge showed "Pro"
+    # here while `/api/chat/status`/`/api/profile/trends` (both already
+    # uncached) correctly enforced "free" — `/me` must never be the one
+    # stale source of truth.
+    plan = get_plan_by_email(email)
+    premium = plan != "free"
     starter_calc_remaining: int | None = None
     if not premium:
         starter_calc_remaining = 0 if _db_has_calculation(email) else 1
