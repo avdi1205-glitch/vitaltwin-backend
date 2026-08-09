@@ -204,6 +204,50 @@ class TestSetPlanByEmail:
         plan_service.set_plan_by_email("x@example.com", "free")
         assert calls == [("x@example.com", False)]
 
+    def test_syncs_in_process_users_store_cache_so_me_endpoint_is_never_stale(self, fake_users_supabase, monkeypatch):
+        """Regression test: `/api/users/me` reads `users.py`'s in-process
+        `users_store` cache first (see `_get_user`). Admin Tarif-Wechsel and
+        the Stripe webhook both go through this function, which used to
+        only write the DB `plan` column — leaving a cached user's `plan`
+        stuck at a stale value (observed live: an account already cached
+        as "premium" stayed "premium" for `/me` even after being set to
+        "pro" here, since only the DB row changed)."""
+        monkeypatch.setattr(users_module, "set_premium_by_email", lambda email, premium: True)
+        users_module.users_store["x@example.com"] = {"plan": "premium", "premium": True, "password": "h", "full_name": "X"}
+        plan_service.set_plan_by_email("x@example.com", "pro")
+        assert users_module.users_store["x@example.com"]["plan"] == "pro"
+        assert users_module.users_store["x@example.com"]["premium"] is True
+
+    def test_does_not_sync_cache_when_the_db_write_matches_zero_rows(self, monkeypatch):
+        """Guards the `if updated:` check itself: a Postgrest UPDATE that
+        matches nothing must not falsely mark the stale cache as correct."""
+
+        class _ZeroRowQuery:
+            def select(self, *args, **kwargs):
+                return self
+
+            def update(self, payload):
+                return self
+
+            def eq(self, field, value):
+                return self
+
+            def limit(self, *args, **kwargs):
+                return self
+
+            def execute(self):
+                return SimpleNamespace(data=[])  # UPDATE matched no row — no exception, just empty data
+
+        class _ZeroRowSupabase:
+            def table(self, name):
+                return _ZeroRowQuery()
+
+        monkeypatch.setattr(plan_service, "supabase", _ZeroRowSupabase())
+        monkeypatch.setattr(users_module, "set_premium_by_email", lambda email, premium: True)
+        users_module.users_store["ghost@example.com"] = {"plan": "premium", "premium": True}
+        assert plan_service.set_plan_by_email("ghost@example.com", "pro") is False
+        assert users_module.users_store["ghost@example.com"]["plan"] == "premium"
+
 
 class TestResolvePlanFromPriceId:
     def test_matches_configured_premium_price(self, monkeypatch):

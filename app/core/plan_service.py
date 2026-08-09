@@ -166,15 +166,19 @@ def set_plan_by_email(email: str, plan: PlanId) -> bool:
         raise ValueError(f"Unbekannter Tarif: {plan!r}")
     normalized_email = email.strip().lower()
 
-    from ..routers.users import set_premium_by_email  # local import: breaks core<->routers cycle
+    from ..routers.users import set_premium_by_email, sync_cached_plan  # local import: breaks core<->routers cycle
 
     set_premium_by_email(normalized_email, plan != "free")
 
     try:
         response = supabase.table(USER_TABLE).update({"plan": plan}).eq("email", normalized_email).execute()
-        return bool(response.data)
+        updated = bool(response.data)
     except Exception:
         return False
+
+    if updated:
+        sync_cached_plan(normalized_email, plan)
+    return updated
 
 
 def resolve_plan_from_price_id(price_id: str | None) -> PlanId | None:

@@ -378,6 +378,20 @@ def set_premium_by_email(email: str, premium: bool) -> bool:
     return bool(user) or db_updated
 
 
+def sync_cached_plan(email: str, plan: str) -> None:
+    """`core/plan_service.py::set_plan_by_email` (admin Tarif-Wechsel,
+    Stripe-Webhook) writes `vt_users.plan` directly in the DB and never
+    touches the in-process `users_store` cache — without this, `_get_user`
+    keeps serving the OLD cached plan (via `/api/users/me`, and therefore
+    the dashboard) until this process restarts. Called right after that DB
+    write succeeds to keep the cache truthful."""
+    normalized_email = email.strip().lower()
+    user = users_store.get(normalized_email)
+    if user:
+        user["plan"] = plan
+        user["premium"] = plan != "free"
+
+
 def set_password_by_email(email: str, password: str) -> bool:
     normalized_email = email.lower()
     user = _get_user(normalized_email)
