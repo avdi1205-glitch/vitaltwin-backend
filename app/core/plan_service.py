@@ -56,17 +56,38 @@ _PREMIUM_FEATURES: frozenset[str] = _FREE_FEATURES | frozenset({
     "cgm_nutrition",  # CGM-Import + Ernährungstagebuch (routers/health.py)
 })
 
-# No Pro-exclusive feature is genuinely enforced server-side yet (see
-# PLAN_ARCHITECTURE_REPORT.md) — Pro's set is currently identical to
-# Premium's, which is the CORRECT, honest state: it structurally guarantees
-# "Pro >= Premium" without inventing a feature that doesn't exist yet.
-_PRO_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset()
+# "multiple_goals" (pricing page: "Mehrere persönliche Ziele"),
+# "lifestyle_simulation" (pricing page: "Lifestyle-Simulationen"),
+# "extended_reports" (pricing page: "Erweiterte Berichte"), and
+# "advanced_digital_twin" (pricing page: "Vollständiger erweiterter
+# digitaler Zwilling") are the only genuinely enforced Pro-exclusive
+# features so far — see profile.py::create_goal/::update_goal,
+# ::simulate_lifestyle_change, ::get_thirty_day_report, and
+# ::get_advanced_twin_overview. Everything else Pro-exclusive is still
+# `coming_soon` (see PLAN_ARCHITECTURE_REPORT.md), which remains the
+# correct, honest state.
+_PRO_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
+    "multiple_goals",
+    "lifestyle_simulation",
+    "extended_reports",
+    "advanced_digital_twin",
+})
 
-# Same honesty rule for Family — no real multi-profile/family-sharing
-# backend exists yet (see PLAN_ARCHITECTURE_REPORT.md), so Family's set is
-# Premium's set, guaranteeing "Family >= Premium for general wellness
-# features" without fabricating a family-only feature.
-_FAMILY_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset()
+# Family is >= Pro for general wellness features (no real family-sharing
+# backend exists yet, see PLAN_ARCHITECTURE_REPORT.md, but a Family
+# subscriber should never have FEWER individual-wellness features than Pro).
+_FAMILY_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
+    "multiple_goals",
+    "lifestyle_simulation",
+    "extended_reports",
+    "advanced_digital_twin",
+})
+
+# Free/Premium keep today's pre-existing behavior of exactly one
+# simultaneously active goal (matches Premium's own pricing bullet
+# "Individuelle Tagesziele", singular) — Pro/Family get `multiple_goals`
+# (unlimited). Never retroactively touches goals a user already created.
+FREE_TIER_MAX_ACTIVE_GOALS = 1
 
 FEATURE_SETS: dict[PlanId, frozenset[str]] = {
     "free": _FREE_FEATURES,
@@ -146,6 +167,16 @@ def has_feature(email: str, feature: str) -> bool:
     a raw `if premium` / `if plan == ...`."""
     plan = get_plan_by_email(email)
     return feature in FEATURE_SETS[plan]
+
+
+def get_active_goal_limit(email: str) -> int | None:
+    """Max number of simultaneously ACTIVE `vt_wellness_goals` rows for this
+    user's plan, or `None` for unlimited (Pro/Family via `multiple_goals`).
+    Used only to gate NEW activations — never removes/deactivates a goal a
+    user already has."""
+    if has_feature(email, "multiple_goals"):
+        return None
+    return FREE_TIER_MAX_ACTIVE_GOALS
 
 
 def set_plan_by_email(email: str, plan: PlanId) -> bool:

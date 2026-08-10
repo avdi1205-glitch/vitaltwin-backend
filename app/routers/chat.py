@@ -189,10 +189,13 @@ def _combine_habits_with_stats(
     return habits
 
 
-def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, str]], bool]:
+def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, str]], bool, dict[str, object] | None]:
     """Gathers every raw data piece for this user only (every query scoped
     by `email`), then hands it to the pure `build_twin_context` to shape,
-    redact, and cap it. Returns (context_text, sources, truncated).
+    redact, and cap it. Returns (context_text, sources, truncated, profile)
+    — the caller reuses the already-fetched `profile` (e.g. for
+    `preferred_language`) instead of issuing a second, separate profile
+    query for the same user.
 
     All independent lookups below run concurrently via `run_parallel`
     (same pattern as the Founder-OS dashboards) instead of one after
@@ -372,7 +375,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         max_chars=get_context_char_limit(plan),
     )
     sources = [{"type": s.type, "label": s.label} for s in context.sources]
-    return context.text, sources, context.truncated
+    return context.text, sources, context.truncated, profile
 
 
 @router.get("/status")
@@ -447,13 +450,11 @@ async def ask_twin(data: ChatRequest, request: Request, authorization: str | Non
             "context_truncated": False,
         }
 
-    try:
-        profile_resp = supabase.table(PROFILE_TABLE).select("preferred_language").eq("email", email).limit(1).execute()
-        language = (profile_resp.data[0].get("preferred_language") if profile_resp.data else None) or "de"
-    except Exception:
-        language = "de"
-
-    context_text, sources, truncated = _build_context_for_user(email, plan)
+    # Reuses the profile already loaded inside _build_context_for_user
+    # (same row, same email) instead of issuing a second, separate
+    # `PROFILE_TABLE` query just for `preferred_language`.
+    context_text, sources, truncated, profile = _build_context_for_user(email, plan)
+    language = (profile.get("preferred_language") if profile else None) or "de"
     system_prompt = build_conversation_system_prompt(context_text=context_text, language=language)
 
     provider = _get_ai_provider()

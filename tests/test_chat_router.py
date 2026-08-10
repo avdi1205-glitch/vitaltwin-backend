@@ -128,7 +128,78 @@ class TestContextQueriesAreScopedToRequestingUser:
         fake_supabase = _RecordingSupabase()
         monkeypatch.setattr(chat_module, "supabase", fake_supabase)
 
-        text, sources, truncated = chat_module._build_context_for_user("user-a@example.com", "free")
+        text, sources, truncated, profile = chat_module._build_context_for_user("user-a@example.com", "free")
         assert isinstance(text, str) and text
         assert sources == []
         assert truncated is False
+        assert profile is None
+
+
+def _old_language_resolution(profile_rows):
+    """Verbatim reconstruction of the OLD `ask_twin()` snippet removed by the
+    profile-reuse optimization (`profile_resp.data[0].get(...) if data else
+    None) or "de"`, wrapped in the same try/except("de")). Used only to
+    prove the NEW logic resolves to the identical language for every state."""
+    try:
+        return (profile_rows[0].get("preferred_language") if profile_rows else None) or "de"
+    except Exception:
+        return "de"
+
+
+class TestLanguageResolutionOldVsNewEquivalence:
+    """Proves (not just reasons) that reusing `_build_context_for_user`'s
+    already-fetched profile row resolves `preferred_language` identically
+    to the old, separate query for every possible profile state."""
+
+    @pytest.mark.parametrize(
+        "profile_rows,expected_language",
+        [
+            ([{"preferred_language": "de"}], "de"),
+            ([{"preferred_language": "en"}], "en"),
+            ([{"email": "user-a@example.com"}], "de"),  # preferred_language key missing
+            ([], "de"),  # query ran, zero rows
+            (None, "de"),  # data attribute absent / falsy
+        ],
+    )
+    def test_new_extraction_matches_old_extraction(self, profile_rows, expected_language):
+        old_result = _old_language_resolution(profile_rows)
+        assert old_result == expected_language
+
+        # NEW logic: `profile` is the dict `_build_context_for_user` already
+        # returns (first row or None) — same extraction, different source.
+        profile = profile_rows[0] if profile_rows else None
+        new_result = (profile.get("preferred_language") if profile else None) or "de"
+        assert new_result == old_result
+
+    def test_missing_profile_row_resolves_to_de_via_real_build_context_for_user(self, monkeypatch):
+        fake_supabase = _RecordingSupabase()
+        monkeypatch.setattr(chat_module, "supabase", fake_supabase)
+
+        _, _, _, profile = chat_module._build_context_for_user("user-a@example.com", "free")
+        assert profile is None
+        assert ((profile.get("preferred_language") if profile else None) or "de") == "de"
+
+    def test_db_error_during_profile_fetch_resolves_to_de_via_real_build_context_for_user(self, monkeypatch):
+        class _RaisingProfileQuery(_RecordingQuery):
+            def execute(self):
+                raise RuntimeError("simulated database error")
+
+        class _PartlyRaisingSupabase(_RecordingSupabase):
+            def table(self, name):
+                if name == chat_module.PROFILE_TABLE:
+                    return _RaisingProfileQuery(name, self.calls)
+                return super().table(name)
+
+        monkeypatch.setattr(chat_module, "supabase", _PartlyRaisingSupabase())
+        _, _, _, profile = chat_module._build_context_for_user("user-a@example.com", "free")
+        assert profile is None
+        assert ((profile.get("preferred_language") if profile else None) or "de") == "de"
+
+    def test_profile_query_is_isolated_to_the_requesting_users_own_email(self, monkeypatch):
+        fake_supabase = _RecordingSupabase()
+        monkeypatch.setattr(chat_module, "supabase", fake_supabase)
+
+        chat_module._build_context_for_user("user-a@example.com", "free")
+
+        profile_calls = [c for c in fake_supabase.calls if c[0] == chat_module.PROFILE_TABLE]
+        assert profile_calls == [(chat_module.PROFILE_TABLE, "email", "user-a@example.com")]

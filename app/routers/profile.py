@@ -21,10 +21,13 @@ from ..core.validation import (
     validate_sleep_hours,
 )
 from ..services.habit_service import compute_habit_stats
+from ..services.advanced_twin_overview import build_advanced_twin_overview
+from ..services.lifestyle_simulation import SIMULATABLE_FIELDS, simulate_metric_change
 from ..services.personal_baseline import build_personal_baseline_report
 from ..services.privacy_export import count_total_export_rows, exceeds_sync_export_limit
+from ..services.thirty_day_report import build_thirty_day_report
 from ..services.trends import compute_trend
-from ..core.plan_service import has_feature
+from ..core.plan_service import get_active_goal_limit, has_feature
 
 router = APIRouter()
 
@@ -714,6 +717,302 @@ async def get_personal_baseline(authorization: str | None = Header(default=None)
 
     return build_personal_baseline_report(entries, date.today())
 
+
+class SimulationRequest(BaseModel):
+    field: Literal["sleep_hours", "movement_minutes", "stress"]
+    delta: float = Field(ge=-1000, le=1000)
+
+    @field_validator("field")
+    @classmethod
+    def _validate_field(cls, value: str) -> str:
+        if value not in SIMULATABLE_FIELDS:
+            raise ValueError(f"Ungültiges Feld. Erlaubt: {', '.join(SIMULATABLE_FIELDS)}")
+        return value
+
+
+@router.post("/simulate")
+async def simulate_lifestyle_change(data: SimulationRequest, authorization: str | None = Header(default=None)):
+    """Lifestyle-Simulationen ("Wellness-Szenarien", Pro/Family only, see
+    `lib/plans.ts` on the frontend) — a purely arithmetic what-if recompute
+    of the user's own 7-day average, never a medical prediction (see
+    `services/lifestyle_simulation.py` docstring)."""
+    email = _require_email(authorization)
+    if not has_feature(email, "lifestyle_simulation"):
+        raise HTTPException(
+            status_code=403,
+            detail="Wellness-Szenarien (Simulation) sind ein Pro-Feature. Upgrade auf Pro, um zu simulieren.",
+        )
+
+    try:
+        response = (
+            supabase.table(DAILY_ENTRY_TABLE)
+            .select("*")
+            .eq("email", email)
+            .order("entry_date", desc=True)
+            .limit(30)
+            .execute()
+        )
+        entries = response.data or []
+    except Exception:
+        entries = []
+
+    result = simulate_metric_change(entries, field=data.field, delta=data.delta, today=date.today())
+    return {
+        "field": result.field,
+        "window_days": result.window_days,
+        "current_average": result.current_average,
+        "delta": result.delta,
+        "simulated_average": result.simulated_average,
+        "data_points": result.data_points,
+        "data_quality": result.data_quality,
+        "disclaimer": result.disclaimer,
+    }
+
+
+@router.get("/reports/30-day")
+async def get_thirty_day_report(authorization: str | None = Header(default=None)):
+    """30-Tage-Bericht ("Erweiterte Berichte", Pro/Family only, see
+    `lib/plans.ts` on the frontend) — assembles the existing Monthly
+    Progress foundation + Personal Baseline Engine into one report, see
+    `services/thirty_day_report.py` docstring. Beta status: automated-
+    tested only, not yet live-verified with real user data end-to-end."""
+    email = _require_email(authorization)
+    if not has_feature(email, "extended_reports"):
+        raise HTTPException(
+            status_code=403,
+            detail="Der 30-Tage-Bericht ist ein Pro-Feature. Upgrade auf Pro für erweiterte Berichte.",
+        )
+
+    today = date.today()
+
+    def _daily_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(DAILY_ENTRY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .order("entry_date", desc=True)
+                .limit(60)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _habits_raw() -> list[dict[str, object]]:
+        try:
+            return supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
+        except Exception:
+            return []
+
+    def _habit_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(HABIT_ENTRY_TABLE)
+                .select("habit_id,entry_date,completed")
+                .eq("email", email)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _goals() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(GOAL_TABLE).select("*").eq("email", email).is_("deleted_at", "null").execute().data or []
+            )
+        except Exception:
+            return []
+
+    def _confirmed_memories() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(MEMORY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .in_("status", ["active", "confirmed"])
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _confirmed_patterns() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(PATTERN_TABLE).select("*").eq("email", email).eq("status", "active").execute().data or []
+            )
+        except Exception:
+            return []
+
+    entries, habits_raw, habit_entries, goals, confirmed_memories, confirmed_patterns = run_parallel(
+        _daily_entries, _habits_raw, _habit_entries, _goals, _confirmed_memories, _confirmed_patterns
+    )
+
+    entries_by_habit: dict[str, list[dict[str, object]]] = {}
+    for entry in habit_entries:
+        entries_by_habit.setdefault(str(entry.get("habit_id")), []).append(entry)
+    habits = [
+        {
+            **habit,
+            **compute_habit_stats(
+                entries_by_habit.get(str(habit.get("id")), []), habit_created_at=habit.get("created_at"), today=today
+            ),
+        }
+        for habit in habits_raw
+    ]
+
+    report = build_thirty_day_report(
+        entries=entries,
+        habits=habits,
+        goals=goals,
+        confirmed_memories=confirmed_memories,
+        confirmed_patterns=confirmed_patterns,
+        today=today,
+    )
+    return {
+        "available": report.available,
+        "data_points": report.data_points,
+        "period_days": report.period_days,
+        "reason": report.reason,
+        "coverage_ratio": report.coverage_ratio,
+        "trends": report.trends,
+        "baseline_comparison": report.baseline_comparison,
+        "goal_progress": report.goal_progress,
+        "habit_progress": report.habit_progress,
+        "consistency_patterns": report.consistency_patterns,
+        "strongest_positive_trend": report.strongest_positive_trend,
+        "strongest_negative_trend": report.strongest_negative_trend,
+        "summary": report.summary,
+        "disclaimer": report.disclaimer,
+    }
+
+
+@router.get("/advanced-twin-overview")
+async def get_advanced_twin_overview(authorization: str | None = Header(default=None)):
+    """Erweiterter digitaler Zwilling V1 ("advanced_digital_twin", Pro/
+    Family only) — a pure composition of already-existing baseline/trend/
+    30-day-report/goal/habit outputs, see
+    `services/advanced_twin_overview.py` docstring. Beta status: automated-
+    tested only, not yet live-verified with real user data end-to-end."""
+    email = _require_email(authorization)
+    if not has_feature(email, "advanced_digital_twin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Der erweiterte digitale Zwilling ist ein Pro-Feature. Upgrade auf Pro für die vollständige Übersicht.",
+        )
+
+    today = date.today()
+
+    def _daily_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(DAILY_ENTRY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .order("entry_date", desc=True)
+                .limit(60)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _habits_raw() -> list[dict[str, object]]:
+        try:
+            return supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
+        except Exception:
+            return []
+
+    def _habit_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(HABIT_ENTRY_TABLE)
+                .select("habit_id,entry_date,completed")
+                .eq("email", email)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _goals() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(GOAL_TABLE).select("*").eq("email", email).is_("deleted_at", "null").execute().data or []
+            )
+        except Exception:
+            return []
+
+    def _confirmed_memories() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(MEMORY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .in_("status", ["active", "confirmed"])
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _confirmed_patterns() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(PATTERN_TABLE).select("*").eq("email", email).eq("status", "active").execute().data or []
+            )
+        except Exception:
+            return []
+
+    entries, habits_raw, habit_entries, goals, confirmed_memories, confirmed_patterns = run_parallel(
+        _daily_entries, _habits_raw, _habit_entries, _goals, _confirmed_memories, _confirmed_patterns
+    )
+
+    entries_by_habit: dict[str, list[dict[str, object]]] = {}
+    for entry in habit_entries:
+        entries_by_habit.setdefault(str(entry.get("habit_id")), []).append(entry)
+    habits = [
+        {
+            **habit,
+            **compute_habit_stats(
+                entries_by_habit.get(str(habit.get("id")), []), habit_created_at=habit.get("created_at"), today=today
+            ),
+        }
+        for habit in habits_raw
+    ]
+
+    overview = build_advanced_twin_overview(
+        entries=entries,
+        habits=habits,
+        goals=goals,
+        confirmed_memories=confirmed_memories,
+        confirmed_patterns=confirmed_patterns,
+        today=today,
+    )
+    return {
+        "available": overview.available,
+        "data_points": overview.data_points,
+        "data_quality_overview": overview.data_quality_overview,
+        "reason": overview.reason,
+        "current_trends": overview.current_trends,
+        "personal_baseline": overview.personal_baseline,
+        "thirty_day_development": overview.thirty_day_development,
+        "active_goals": overview.active_goals,
+        "habit_progress": overview.habit_progress,
+        "lifestyle_simulation": overview.lifestyle_simulation,
+        "twin_status_summary": overview.twin_status_summary,
+        "disclaimer": overview.disclaimer,
+    }
+
+
 @router.get("/habits")
 async def list_habits(authorization: str | None = Header(default=None)):
     email = _require_email(authorization)
@@ -891,9 +1190,44 @@ async def list_goals(authorization: str | None = Header(default=None)):
         return {"items": []}
 
 
+def _count_active_goals(email: str) -> int:
+    try:
+        return len(
+            supabase.table(GOAL_TABLE)
+            .select("id")
+            .eq("email", email)
+            .eq("status", "active")
+            .is_("deleted_at", "null")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return 0
+
+
+def _enforce_active_goal_limit(email: str) -> None:
+    """Pro/Family (`multiple_goals`) may have unlimited active goals;
+    Free/Premium are capped at `FREE_TIER_MAX_ACTIVE_GOALS` (pricing page:
+    "Mehrere persönliche Ziele" is a Pro/Family-only bullet). Only blocks
+    NEW activations — never touches a goal the user already has."""
+    limit = get_active_goal_limit(email)
+    if limit is not None and _count_active_goals(email) >= limit:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Dein Tarif erlaubt aktuell {limit} aktives Ziel gleichzeitig. "
+                "Pausiere ein bestehendes Ziel oder upgrade auf Pro für mehrere gleichzeitige Ziele."
+            ),
+        )
+
+
 @router.post("/goals")
 async def create_goal(data: GoalCreate, authorization: str | None = Header(default=None)):
     email = _require_email(authorization)
+    if data.status == "active":
+        _enforce_active_goal_limit(email)
+
     payload = {
         "email": email,
         "title": data.title,
@@ -937,6 +1271,9 @@ def _require_own_goal(email: str, goal_id: str) -> dict[str, object]:
 async def update_goal(goal_id: str, data: GoalUpdate, authorization: str | None = Header(default=None)):
     email = _require_email(authorization)
     existing_goal = _require_own_goal(email, goal_id)
+
+    if data.status == "active" and existing_goal.get("status") != "active":
+        _enforce_active_goal_limit(email)
 
     payload = data.model_dump(exclude_none=True)
     if "target_date" in payload and payload["target_date"] is not None:
