@@ -81,12 +81,17 @@ _PRO_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
 # routers/family.py::create_family. It deliberately grants ONLY the right
 # to create/own a Family membership group, NOT shared wellness-data
 # visibility (still not built, see routers/family.py module docstring).
+# "family_goals" gates only CREATING a Family Goal (routers/family.py::
+# create_family_goal) — joining/viewing/updating own progress only
+# requires being an active member of the family itself (any personal
+# plan), never a second personal-plan check.
 _FAMILY_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
     "multiple_goals",
     "lifestyle_simulation",
     "extended_reports",
     "advanced_digital_twin",
     "family_profiles",
+    "family_goals",
 })
 
 # Free/Premium keep today's pre-existing behavior of exactly one

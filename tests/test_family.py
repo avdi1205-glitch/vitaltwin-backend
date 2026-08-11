@@ -20,7 +20,8 @@ from app.routers import family as family_module
 
 
 class _Table:
-    def __init__(self):
+    def __init__(self, name: str):
+        self.name = name
         self.rows: list[dict[str, object]] = []
         self._next_id = 1
 
@@ -37,6 +38,8 @@ class _Query:
         self._op: str | None = None
         self._payload: dict[str, object] | None = None
         self._limit: int | None = None
+        self._order_field: str | None = None
+        self._order_desc: bool = False
 
     def select(self, *args, **kwargs):
         self._op = self._op or "select"
@@ -60,7 +63,9 @@ class _Query:
         self._filters.append(("in", field, values))
         return self
 
-    def order(self, *args, **kwargs):
+    def order(self, field, desc: bool = False, **kwargs):
+        self._order_field = field
+        self._order_desc = desc
         return self
 
     def limit(self, value):
@@ -80,6 +85,8 @@ class _Query:
                     break
             if ok:
                 result.append(row)
+        if self._order_field:
+            result = sorted(result, key=lambda r: r.get(self._order_field), reverse=self._order_desc)
         if self._limit is not None:
             result = result[: self._limit]
         return result
@@ -88,8 +95,15 @@ class _Query:
         if self._op == "insert":
             new_row = dict(self._payload or {})
             new_row.setdefault("id", self._table.next_id())
-            new_row.setdefault("status", "invited")
+            if self._table.name == family_module.MEMBER_TABLE:
+                new_row.setdefault("status", "invited")
+            elif self._table.name == family_module.GOAL_TABLE:
+                new_row.setdefault("status", "active")
+            elif self._table.name == family_module.GOAL_MEMBER_TABLE:
+                new_row.setdefault("progress_value", 0)
+                new_row.setdefault("completed", False)
             new_row.setdefault("created_at", new_row["id"])
+            new_row.setdefault("joined_at", new_row["id"])
             self._table.rows.append(new_row)
             return SimpleNamespace(data=[new_row])
         if self._op == "update":
@@ -103,10 +117,12 @@ class _Query:
 class _FakeSupabase:
     def __init__(self):
         self.tables = {
-            family_module.FAMILY_TABLE: _Table(),
-            family_module.MEMBER_TABLE: _Table(),
-            family_module.USER_TABLE: _Table(),
-            family_module.PROFILE_TABLE: _Table(),
+            family_module.FAMILY_TABLE: _Table(family_module.FAMILY_TABLE),
+            family_module.MEMBER_TABLE: _Table(family_module.MEMBER_TABLE),
+            family_module.USER_TABLE: _Table(family_module.USER_TABLE),
+            family_module.PROFILE_TABLE: _Table(family_module.PROFILE_TABLE),
+            family_module.GOAL_TABLE: _Table(family_module.GOAL_TABLE),
+            family_module.GOAL_MEMBER_TABLE: _Table(family_module.GOAL_MEMBER_TABLE),
         }
 
     def seed_user(self, user_id: int, email: str, display_name: str | None = None):
@@ -380,3 +396,180 @@ class TestIsolationAndPrivacy:
 
         result_b = await family_module.get_my_family(authorization="Bearer x")
         assert all(m["email"] != "owner@example.com" for m in result_b["members"])
+
+
+async def _setup_family_with_member(monkeypatch, fake_family_env):
+    """Owner (user 1) creates a Family and invites+accepts member2 (user
+    2) — the shared starting state for every Family Goals test below."""
+    monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
+    monkeypatch.setattr(family_module, "has_feature", lambda email, feature: True)
+    await family_module.create_family(authorization="Bearer x")
+    monkeypatch.setattr(family_module, "get_user_id_by_email", lambda email: 2)
+    await family_module.invite_member(family_module.InviteRequest(email="member2@example.com"), authorization="Bearer x")
+    monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+    await family_module.accept_invitation(authorization="Bearer x")
+    monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
+
+
+class TestFamilyGoalsCreateAndEntitlement:
+    @pytest.mark.anyio
+    async def test_owner_can_create_family_goal(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        result = await family_module.create_family_goal(
+            family_module.FamilyGoalCreate(title="3 Spaziergänge diese Woche"), authorization="Bearer x"
+        )
+        assert result["title"] == "3 Spaziergänge diese Woche"
+        assert result["status"] == "active"
+        assert result["participants"] == []
+
+    @pytest.mark.anyio
+    async def test_member_cannot_create_family_goal(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.create_family_goal(
+                family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x"
+            )
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_non_family_tier_cannot_create_family_goal(self, fake_family_env, monkeypatch):
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
+        monkeypatch.setattr(family_module, "has_feature", lambda email, feature: True)
+        await family_module.create_family(authorization="Bearer x")
+
+        monkeypatch.setattr(family_module, "has_feature", lambda email, feature: False)
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.create_family_goal(
+                family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x"
+            )
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_family_tier_owner_allowed(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        result = await family_module.create_family_goal(
+            family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x"
+        )
+        assert result["id"] is not None
+
+
+class TestFamilyGoalsListingAndIsolation:
+    @pytest.mark.anyio
+    async def test_family_members_can_list_goals(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        await family_module.create_family_goal(family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x")
+
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        result = await family_module.list_family_goals(authorization="Bearer x")
+        assert len(result["goals"]) == 1
+        assert result["goals"][0]["title"] == "Ziel"
+
+    @pytest.mark.anyio
+    async def test_family_isolation_for_goals(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        goal = await family_module.create_family_goal(
+            family_module.FamilyGoalCreate(title="Familie A Ziel"), authorization="Bearer x"
+        )
+
+        fake_family_env.seed_user(10, "owner-b@example.com")
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(10, "owner-b@example.com"))
+        await family_module.create_family(authorization="Bearer x")
+
+        result_b = await family_module.list_family_goals(authorization="Bearer x")
+        assert result_b["goals"] == []
+
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.update_family_goal(
+                goal["id"], family_module.FamilyGoalUpdate(title="Übernommen"), authorization="Bearer x"
+            )
+        assert exc_info.value.status_code == 404
+
+
+class TestFamilyGoalsParticipationAndProgress:
+    @pytest.mark.anyio
+    async def test_member_can_join_goal(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        goal = await family_module.create_family_goal(family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x")
+
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        result = await family_module.join_family_goal(goal["id"], authorization="Bearer x")
+        assert result["participant_count"] == 1
+        assert result["participants"][0]["user_id"] == 2
+
+    @pytest.mark.anyio
+    async def test_member_can_update_own_progress(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        goal = await family_module.create_family_goal(family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x")
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        await family_module.join_family_goal(goal["id"], authorization="Bearer x")
+
+        result = await family_module.update_family_goal_progress(
+            goal["id"], family_module.FamilyGoalProgress(progress_value=2, completed=False), authorization="Bearer x"
+        )
+        participant = next(p for p in result["participants"] if p["user_id"] == 2)
+        assert participant["progress_value"] == 2
+
+    @pytest.mark.anyio
+    async def test_member_cannot_update_another_members_progress(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        goal = await family_module.create_family_goal(family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x")
+        # Owner joins too, then member2 tries to update the OWNER's progress row.
+        await family_module.join_family_goal(goal["id"], authorization="Bearer x")
+
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.update_family_goal_progress(
+                goal["id"], family_module.FamilyGoalProgress(completed=True), authorization="Bearer x"
+            )
+        # member2 never joined, so they have no own row to update -> 404 (never touches user 1's row).
+        assert exc_info.value.status_code == 404
+        goal_members = fake_family_env.tables[family_module.GOAL_MEMBER_TABLE].rows
+        owner_row = next(r for r in goal_members if r["user_id"] == 1)
+        assert owner_row["completed"] is False
+
+
+class TestFamilyGoalsOwnerManagement:
+    @pytest.mark.anyio
+    async def test_owner_can_edit_goal(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        goal = await family_module.create_family_goal(family_module.FamilyGoalCreate(title="Alt"), authorization="Bearer x")
+        result = await family_module.update_family_goal(
+            goal["id"], family_module.FamilyGoalUpdate(title="Neu"), authorization="Bearer x"
+        )
+        assert result["title"] == "Neu"
+
+    @pytest.mark.anyio
+    async def test_owner_can_archive_goal(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        goal = await family_module.create_family_goal(family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x")
+        result = await family_module.archive_family_goal(goal["id"], authorization="Bearer x")
+        assert result["archived"] is True
+
+        listing = await family_module.list_family_goals(authorization="Bearer x")
+        assert listing["goals"] == []
+
+    @pytest.mark.anyio
+    async def test_removed_family_member_loses_goal_access(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        goal = await family_module.create_family_goal(family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x")
+        await family_module.remove_member(2, authorization="Bearer x")
+
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.list_family_goals(authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+
+class TestFamilyGoalsPrivacy:
+    @pytest.mark.anyio
+    async def test_no_private_wellness_fields_exposed(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        goal = await family_module.create_family_goal(family_module.FamilyGoalCreate(title="Ziel"), authorization="Bearer x")
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        result = await family_module.join_family_goal(goal["id"], authorization="Bearer x")
+
+        for participant in result["participants"]:
+            assert set(participant.keys()) == {"user_id", "email", "display_name", "progress_value", "completed"}
+        assert set(result["created_by"].keys()) == {"email", "display_name"}
+

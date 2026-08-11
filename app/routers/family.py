@@ -1,20 +1,23 @@
-"""Family Foundation V1 ("Vollständiger erweiterter digitaler Zwilling" ->
-Family tier, multi-profile membership only).
+"""Family Foundation (membership) + Family Goals V1 (shared coordination
+goals, Family tier).
 
-Constitution-critical scope limit (see task spec): this module ONLY builds
-account membership — who belongs to which Family group, with which role
-and status. It does NOT grant any member (owner included) automatic access
-to another member's private wellness data (check-ins, CGM/nutrition,
-Google Health, Twin chat, goals, habits, reports, simulations). Each
-member remains a fully independent VitalTwin account; membership is purely
-an identity/roster relationship. Shared challenges, family goals, and any
-cross-member data visibility are explicitly OUT OF SCOPE for this file and
-must not be added here without a separate, deliberate task.
+Constitution-critical scope limit (see task spec): membership is purely an
+identity/roster relationship — it does NOT grant any member (owner
+included) automatic access to another member's private wellness data
+(check-ins, CGM/nutrition, Google Health, Twin chat, PERSONAL goals,
+habits, reports, simulations). Family Goals are a SEPARATE, deliberately
+narrow system: shared coordination goals (e.g. "3 Spaziergänge diese
+Woche") where a member explicitly submits their own participation/
+progress for that shared goal — never a window into anyone's private
+wellness data. `vt_wellness_goals` (personal goals) is untouched and
+never read here. Shared challenges, family overview/dashboard, and any
+automatic health-data sharing are explicitly OUT OF SCOPE and must not be
+added here without a separate, deliberate task.
 
 Reuses `core/auth.py::require_user`/`get_user_id_by_email` (no parallel
-identity resolution), `core/plan_service.py::has_feature` (the
-`family_profiles` feature — Family tier only), and the same best-effort
-SMTP pattern already used by `routers/contact.py` (no new email service).
+identity resolution), `core/plan_service.py::has_feature` (`family_profiles`/
+`family_goals` features — Family tier only), and the same best-effort SMTP
+pattern already used by `routers/contact.py` (no new email service).
 """
 
 from __future__ import annotations
@@ -22,8 +25,9 @@ from __future__ import annotations
 import os
 import re
 import smtplib
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email.message import EmailMessage
+from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
@@ -38,6 +42,8 @@ FAMILY_TABLE = "vt_families"
 MEMBER_TABLE = "vt_family_members"
 USER_TABLE = "vt_users"
 PROFILE_TABLE = "vt_user_profiles"
+GOAL_TABLE = "vt_family_goals"
+GOAL_MEMBER_TABLE = "vt_family_goal_members"
 
 OPEN_STATUSES = ("active", "invited")
 
@@ -93,25 +99,12 @@ def _count_active_members(family_id: int) -> int:
         return 0
 
 
-def _list_members(family_id: int) -> list[dict[str, object]]:
-    try:
-        rows = (
-            supabase.table(MEMBER_TABLE)
-            .select("*")
-            .eq("family_id", family_id)
-            .in_("status", OPEN_STATUSES)
-            .order("created_at")
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        return []
-
-    user_ids = [row["user_id"] for row in rows]
+def _resolve_identities(user_ids: list[int]) -> dict[int, dict[str, object]]:
+    """Shared by the member roster and Family Goal participants — never
+    duplicated. Returns ONLY identity fields (email/display_name), never
+    any wellness data."""
     if not user_ids:
-        return []
-
+        return {}
     try:
         user_rows = supabase.table(USER_TABLE).select("id,email").in_("id", user_ids).execute().data or []
     except Exception:
@@ -129,14 +122,36 @@ def _list_members(family_id: int) -> list[dict[str, object]]:
         except Exception:
             display_name_by_email = {}
 
+    return {
+        uid: {"email": email, "display_name": display_name_by_email.get(email)}
+        for uid, email in email_by_id.items()
+    }
+
+
+def _list_members(family_id: int) -> list[dict[str, object]]:
+    try:
+        rows = (
+            supabase.table(MEMBER_TABLE)
+            .select("*")
+            .eq("family_id", family_id)
+            .in_("status", OPEN_STATUSES)
+            .order("created_at")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return []
+
+    identities = _resolve_identities([row["user_id"] for row in rows])
     members = []
     for row in rows:
         uid = int(row["user_id"])
-        email = email_by_id.get(uid, "")
+        identity = identities.get(uid, {"email": "", "display_name": None})
         members.append({
             "user_id": uid,
-            "email": email,
-            "display_name": display_name_by_email.get(email),
+            "email": identity["email"],
+            "display_name": identity["display_name"],
             "role": row.get("role"),
             "status": row.get("status"),
         })
@@ -400,3 +415,304 @@ async def remove_member(user_id: int, authorization: str | None = Header(default
         raise HTTPException(status_code=500, detail="Mitglied konnte nicht entfernt werden.") from exc
 
     return {"removed": True}
+
+
+# ---------------------------------------------------------------------------
+# Family Goals V1 — shared coordination goals, NOT private wellness data.
+# ---------------------------------------------------------------------------
+
+TargetType = Literal["count", "days", "custom"]
+
+
+class FamilyGoalCreate(BaseModel):
+    title: str
+    description: str | None = None
+    target_type: TargetType = "count"
+    target_value: float | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Bitte gib einen Titel für das Familienziel ein.")
+        return stripped
+
+
+class FamilyGoalUpdate(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    target_type: TargetType | None = None
+    target_value: float | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    status: Literal["active", "archived"] | None = None
+
+
+class FamilyGoalProgress(BaseModel):
+    progress_value: float | None = None
+    completed: bool | None = None
+
+
+def _require_active_membership(user_id: int) -> dict[str, object]:
+    """Family Goals require the caller to be a currently ACTIVE member
+    (not merely invited) — a removed/left member loses access entirely,
+    same as the membership roster itself."""
+    membership = _get_open_membership(user_id)
+    if not membership or membership.get("status") != "active":
+        raise HTTPException(status_code=403, detail="Du bist aktuell kein aktives Family-Mitglied.")
+    return membership
+
+
+def _get_family_goal(goal_id: int, family_id: int) -> dict[str, object] | None:
+    """Scoped by family_id so Family A can never reach Family B's goal by
+    id — a 404 (not 403) so a guessed id can't be distinguished from one
+    that doesn't exist."""
+    try:
+        rows = (
+            supabase.table(GOAL_TABLE).select("*").eq("id", goal_id).eq("family_id", family_id).limit(1).execute().data
+            or []
+        )
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _list_goal_participants(goal_id: int) -> list[dict[str, object]]:
+    """ONLY identity + explicitly-submitted progress for THIS goal — never
+    any private wellness data (Constitution privacy rule)."""
+    try:
+        rows = (
+            supabase.table(GOAL_MEMBER_TABLE).select("*").eq("family_goal_id", goal_id).order("joined_at").execute().data
+            or []
+        )
+    except Exception:
+        return []
+
+    identities = _resolve_identities([row["user_id"] for row in rows])
+    return [
+        {
+            "user_id": int(row["user_id"]),
+            "email": identities.get(int(row["user_id"]), {"email": ""}).get("email"),
+            "display_name": identities.get(int(row["user_id"]), {"display_name": None}).get("display_name"),
+            "progress_value": row.get("progress_value"),
+            "completed": row.get("completed"),
+        }
+        for row in rows
+    ]
+
+
+def _serialize_goal(goal: dict[str, object]) -> dict[str, object]:
+    participants = _list_goal_participants(int(goal["id"]))
+    creator = _resolve_identities([int(goal["created_by_user_id"])]).get(
+        int(goal["created_by_user_id"]), {"email": "", "display_name": None}
+    )
+    return {
+        "id": int(goal["id"]),
+        "title": goal.get("title"),
+        "description": goal.get("description"),
+        "target_type": goal.get("target_type"),
+        "target_value": goal.get("target_value"),
+        "start_date": goal.get("start_date"),
+        "end_date": goal.get("end_date"),
+        "status": goal.get("status"),
+        "created_by": creator,
+        "participants": participants,
+        "participant_count": len(participants),
+        "completed_count": sum(1 for p in participants if p.get("completed")),
+    }
+
+
+@router.get("/goals")
+async def list_family_goals(authorization: str | None = Header(default=None)):
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+    family_id = int(membership["family_id"])
+
+    try:
+        rows = (
+            supabase.table(GOAL_TABLE)
+            .select("*")
+            .eq("family_id", family_id)
+            .eq("status", "active")
+            .order("created_at", desc=True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
+
+    return {"goals": [_serialize_goal(row) for row in rows]}
+
+
+@router.post("/goals")
+async def create_family_goal(data: FamilyGoalCreate, authorization: str | None = Header(default=None)):
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    if not has_feature(current.email, "family_goals"):
+        raise HTTPException(
+            status_code=403, detail="Familienziele sind ein Family-Tarif-Feature. Upgrade auf Family."
+        )
+    membership = _require_active_membership(current.user_id)
+    if membership.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Nur der Family-Owner kann Familienziele erstellen.")
+
+    payload = {
+        "family_id": int(membership["family_id"]),
+        "created_by_user_id": current.user_id,
+        "title": data.title,
+        "description": data.description,
+        "target_type": data.target_type,
+        "target_value": data.target_value,
+        "start_date": data.start_date.isoformat() if data.start_date else None,
+        "end_date": data.end_date.isoformat() if data.end_date else None,
+    }
+    try:
+        response = supabase.table(GOAL_TABLE).insert(payload).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Familienziel konnte nicht gespeichert werden.") from exc
+    goal_row = response.data[0] if response.data else None
+    if not goal_row:
+        raise HTTPException(status_code=500, detail="Familienziel konnte nicht gespeichert werden.")
+
+    return _serialize_goal(goal_row)
+
+
+@router.patch("/goals/{goal_id}")
+async def update_family_goal(goal_id: int, data: FamilyGoalUpdate, authorization: str | None = Header(default=None)):
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+    if membership.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Nur der Family-Owner kann Familienziele bearbeiten.")
+
+    goal = _get_family_goal(goal_id, int(membership["family_id"]))
+    if not goal:
+        raise HTTPException(status_code=404, detail="Familienziel nicht gefunden.")
+
+    payload = data.model_dump(exclude_none=True)
+    if "start_date" in payload and payload["start_date"] is not None:
+        payload["start_date"] = data.start_date.isoformat()
+    if "end_date" in payload and payload["end_date"] is not None:
+        payload["end_date"] = data.end_date.isoformat()
+    if payload:
+        payload["updated_at"] = _now_iso()
+        try:
+            supabase.table(GOAL_TABLE).update(payload).eq("id", goal_id).execute()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Familienziel konnte nicht aktualisiert werden.") from exc
+
+    updated = _get_family_goal(goal_id, int(membership["family_id"])) or goal
+    return _serialize_goal(updated)
+
+
+@router.delete("/goals/{goal_id}")
+async def archive_family_goal(goal_id: int, authorization: str | None = Header(default=None)):
+    """Soft delete (archives), same convention as personal goals
+    (`profile.py::delete_goal`) — a Family Goal's history stays queryable."""
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+    if membership.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Nur der Family-Owner kann Familienziele archivieren.")
+
+    goal = _get_family_goal(goal_id, int(membership["family_id"]))
+    if not goal:
+        raise HTTPException(status_code=404, detail="Familienziel nicht gefunden.")
+
+    try:
+        supabase.table(GOAL_TABLE).update({"status": "archived", "updated_at": _now_iso()}).eq("id", goal_id).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Familienziel konnte nicht archiviert werden.") from exc
+
+    return {"archived": True}
+
+
+@router.post("/goals/{goal_id}/join")
+async def join_family_goal(goal_id: int, authorization: str | None = Header(default=None)):
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+
+    goal = _get_family_goal(goal_id, int(membership["family_id"]))
+    if not goal or goal.get("status") != "active":
+        raise HTTPException(status_code=404, detail="Familienziel nicht gefunden.")
+
+    try:
+        existing = (
+            supabase.table(GOAL_MEMBER_TABLE)
+            .select("id")
+            .eq("family_goal_id", goal_id)
+            .eq("user_id", current.user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        existing = []
+    if existing:
+        return _serialize_goal(goal)
+
+    try:
+        supabase.table(GOAL_MEMBER_TABLE).insert({
+            "family_goal_id": goal_id,
+            "user_id": current.user_id,
+        }).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Teilnahme konnte nicht gespeichert werden.") from exc
+
+    return _serialize_goal(goal)
+
+
+@router.patch("/goals/{goal_id}/progress")
+async def update_family_goal_progress(
+    goal_id: int, data: FamilyGoalProgress, authorization: str | None = Header(default=None)
+):
+    """A member may only ever update their OWN participation row — never
+    another member's (enforced by filtering the update on `user_id`, not
+    just `family_goal_id`)."""
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+
+    goal = _get_family_goal(goal_id, int(membership["family_id"]))
+    if not goal:
+        raise HTTPException(status_code=404, detail="Familienziel nicht gefunden.")
+
+    try:
+        own_rows = (
+            supabase.table(GOAL_MEMBER_TABLE)
+            .select("id")
+            .eq("family_goal_id", goal_id)
+            .eq("user_id", current.user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        own_rows = []
+    if not own_rows:
+        raise HTTPException(status_code=404, detail="Du nimmst an diesem Familienziel noch nicht teil.")
+
+    payload = data.model_dump(exclude_none=True)
+    if payload:
+        payload["updated_at"] = _now_iso()
+        try:
+            supabase.table(GOAL_MEMBER_TABLE).update(payload).eq("id", own_rows[0]["id"]).execute()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Fortschritt konnte nicht gespeichert werden.") from exc
+
+    return _serialize_goal(goal)
+
