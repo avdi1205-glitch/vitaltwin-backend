@@ -51,9 +51,34 @@ _FREE_FEATURES: frozenset[str] = frozenset({
     "basic_history",
 })
 
+# "detailed_wellness" and "weekly_reports" gate ONLY the customer-facing
+# router endpoints (profile.py::get_personal_baseline,
+# daily_planning.py::get_weekly_reflection) — never the shared service
+# functions they call (`build_personal_baseline_report`/
+# `compute_weekly_reflection`/`compute_trend`), which stay reusable by
+# Free's own core trends and by other already-gated Pro/Family features
+# (advanced_twin_overview.py, thirty_day_report.py both call the baseline
+# function directly, bypassing this endpoint entirely). Two other
+# Premium pricing bullets were deliberately left WITHOUT a new gate after
+# inspection (see PREMIUM_ENTITLEMENT_BOUNDARIES notes in profile.py/
+# daily_planning.py for the full reasoning):
+# - "Schlaf-, Stress- und Erholungsübersicht" — the base 7d/30d trends
+#   endpoint (GET /api/profile/trends) is Free's OWN existing core
+#   feature ("Verlauf bis zu 30 Tage"); the only genuinely Premium-
+#   exclusive part of that endpoint (the 90-day window) is already
+#   gated by "extended_history" — adding a second gate would either
+#   duplicate that logic or break Free's legitimate access.
+# - "Individuelle Tagesziele" — basic goal creation/viewing is a
+#   pre-existing Free-tier capability (`vt_wellness_goals`, migration
+#   001), not something introduced by the Premium tier; the genuinely
+#   Premium-exclusive goal capability is "multiple_goals" (Pro/Family
+#   only, already enforced), which is unrelated to what this bullet
+#   describes for Premium specifically.
 _PREMIUM_FEATURES: frozenset[str] = _FREE_FEATURES | frozenset({
     "extended_history",  # "Erweiterter Verlauf" — GET /api/profile/trends 90d window
     "cgm_nutrition",  # CGM-Import + Ernährungstagebuch (routers/health.py)
+    "detailed_wellness",  # "Ausführlichere Wellness-Auswertungen" — GET /api/profile/baseline
+    "weekly_reports",  # "Wochenberichte" — GET /api/planning/weekly
 })
 
 # "multiple_goals" (pricing page: "Mehrere persönliche Ziele"),

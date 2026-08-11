@@ -699,8 +699,21 @@ async def get_personal_baseline(authorization: str | None = Header(default=None)
     steps, and movement minutes — the only fields currently backed by real
     stored data (see `services/personal_baseline.py` docstring for why
     bedtime/heart rate/weight are not included yet). Reuses the same
-    entries-loading pattern as `/trends`."""
+    entries-loading pattern as `/trends`.
+
+    "Ausführlichere Wellness-Auswertungen" (Premium/Pro/Family, pricing
+    page) — gates ONLY this customer-facing endpoint via
+    `has_feature(email, "detailed_wellness")`. Does NOT gate
+    `build_personal_baseline_report()` itself, which stays a shared
+    service function reusable by other already-gated features
+    (`advanced_twin_overview.py`, `thirty_day_report.py` both call it
+    directly, bypassing this endpoint's entitlement check entirely)."""
     email = _require_email(authorization)
+    if not has_feature(email, "detailed_wellness"):
+        raise HTTPException(
+            status_code=403,
+            detail="Ausführlichere Wellness-Auswertungen sind ein Premium-Feature. Aktiviere Premium unter /preise.",
+        )
 
     try:
         response = (

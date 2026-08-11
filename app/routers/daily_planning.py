@@ -39,6 +39,7 @@ from pydantic import BaseModel, field_validator
 
 from ..core.auth import require_email as _require_email_dependency
 from ..core.concurrency import run_parallel
+from ..core.plan_service import has_feature
 from ..core.supabase import supabase
 from ..core.validation import MAX_REFLECTION_TEXT, validate_scale_1_to_10, validate_short_text
 from ..services import daily_planning, monthly_progress, twin_maturity, weekly_reflection
@@ -521,7 +522,17 @@ async def get_today_reflection(authorization: str | None = Header(default=None))
 
 @router.get("/weekly")
 async def get_weekly_reflection(authorization: str | None = Header(default=None)):
+    """"Wochenberichte" (Premium/Pro/Family, pricing page) — gates ONLY
+    this customer-facing endpoint via `has_feature(email, "weekly_reports")`.
+    Does NOT gate `compute_weekly_reflection()` itself (no other caller
+    exists today) nor the sibling `/monthly`/`/maturity` endpoints on this
+    same router, which stay ungated and keep working for Free."""
     email = _require_email(authorization)
+    if not has_feature(email, "weekly_reports"):
+        raise HTTPException(
+            status_code=403,
+            detail="Wochenberichte sind ein Premium-Feature. Aktiviere Premium unter /preise.",
+        )
     today = date.today()
     week_start = today - timedelta(days=today.weekday())
     previous_week_start = week_start - timedelta(days=7)
