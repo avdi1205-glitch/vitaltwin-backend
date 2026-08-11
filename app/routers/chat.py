@@ -42,6 +42,7 @@ from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
 from ..services import personalization
 from ..services import google_health_signals as ghs
+from ..services import cgm_nutrition_signals as cns
 from ..services.ai_provider import (
     MAX_INPUT_LENGTH,
     AIProvider,
@@ -79,6 +80,8 @@ DAILY_PLAN_ACTION_TABLE = "vt_daily_plan_actions"
 HEALTH_ACTIVITY_TABLE = "health_activity_records"
 HEALTH_SLEEP_TABLE = "health_sleep_records"
 HEALTH_METRIC_TABLE = "health_metric_records"
+CGM_TABLE = "vt_cgm_readings"
+NUTRITION_TABLE = "vt_nutrition_entries"
 
 MIN_SECONDS_BETWEEN_REQUESTS = 3
 IP_RATE_LIMIT_MAX_REQUESTS = 20
@@ -90,6 +93,9 @@ TREND_FIELDS = ("sleep_hours", "energy", "movement_minutes", "stress", "mood")
 # cover both the 7-day recent window and the (non-overlapping) 28-day
 # baseline window ending 7 days ago, i.e. 35 days total.
 GOOGLE_HEALTH_LOOKBACK_DAYS = ghs.RECENT_WINDOW_DAYS + ghs.BASELINE_WINDOW_DAYS
+
+# Twin Core Phase 2: same 35-day lookback principle for CGM/Nutrition.
+CGM_NUTRITION_LOOKBACK_DAYS = cns.RECENT_WINDOW_DAYS + cns.BASELINE_WINDOW_DAYS
 
 
 
@@ -331,6 +337,39 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         # second identity system.
         return get_user_id_by_email(email)
 
+    cgm_nutrition_since_iso = (today - timedelta(days=CGM_NUTRITION_LOOKBACK_DAYS)).isoformat()
+
+    def _cgm_rows() -> list[dict[str, object]]:
+        # Twin Core Phase 2: `vt_cgm_readings` is `email`-keyed (unlike
+        # Google Health's `user_id`-keyed tables) — scoped exactly like
+        # every other query in this function.
+        try:
+            return (
+                supabase.table(CGM_TABLE)
+                .select("glucose_value,reading_at,source")
+                .eq("email", email)
+                .gte("reading_at", cgm_nutrition_since_iso)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _nutrition_rows() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(NUTRITION_TABLE)
+                .select("calories,protein,carbs,fat,logged_at")
+                .eq("email", email)
+                .gte("logged_at", cgm_nutrition_since_iso)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
     (
         profile,
         goals,
@@ -343,6 +382,8 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         confirmed_patterns,
         today_plan_id,
         user_id,
+        cgm_rows,
+        nutrition_rows,
     ) = run_parallel(
         _profile,
         _goals,
@@ -355,6 +396,8 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         _confirmed_patterns,
         _today_plan_id,
         _user_id,
+        _cgm_rows,
+        _nutrition_rows,
     )
 
     habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
@@ -367,6 +410,11 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
     feedback_summary = personalization.compute_category_penalty(recommendation_history)
 
     google_health_context = _build_google_health_context(user_id, daily_entries, today)
+    cgm_context = cns.cgm_to_context_dict(cns.build_cgm_signal(cgm_rows, today=today))
+    nutrition_context = {
+        signal: cns.nutrition_to_context_dict(cns.build_nutrition_signal(nutrition_rows, signal=signal, today=today))
+        for signal in cns.NUTRITION_FIELD_CONFIG
+    }
 
     daily_plan_actions: list[dict[str, object]] = []
     if today_plan_id:
@@ -395,6 +443,8 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         daily_plan_actions=daily_plan_actions,
         max_chars=get_context_char_limit(plan),
         google_health=google_health_context,
+        cgm=cgm_context,
+        nutrition=nutrition_context,
     )
     sources = [{"type": s.type, "label": s.label} for s in context.sources]
     return context.text, sources, context.truncated, profile

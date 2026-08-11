@@ -91,6 +91,6 @@ class TestSystemPromptConstruction:
 
 class TestSourceTypeLabels:
     def test_every_allowed_type_has_a_german_label(self):
-        for source_type in ["user_reported", "trend", "google_health", "confirmed_memory", "pattern", "general_wellness_info", "uncertain", "needs_more_data"]:
+        for source_type in ["user_reported", "trend", "google_health", "cgm", "nutrition", "confirmed_memory", "pattern", "general_wellness_info", "uncertain", "needs_more_data"]:
             assert source_type in SOURCE_TYPE_LABELS
             assert SOURCE_TYPE_LABELS[source_type]

@@ -62,13 +62,22 @@ GOOGLE_HEALTH_LABELS = {
     "weight": "Gewicht",
 }
 
+# Twin Core Phase 2 (CGM + Nutrition -> Twin Intelligence). Same
+# plain-dict-only convention — see `services/cgm_nutrition_signals.py`.
+NUTRITION_LABELS = {
+    "energy_intake": "Kalorien",
+    "protein": "Protein",
+    "carbohydrates": "Kohlenhydrate",
+    "fat": "Fett",
+}
+
 
 @dataclass(frozen=True)
 class ContextSource:
     """One traceable "Datengrundlage" item — surfaced to the frontend so a
     reply can be marked transparently (Etappe 7 §6), never left unlabeled."""
 
-    type: str  # "user_reported" | "trend" | "google_health" | "confirmed_memory" | "pattern" | "general_wellness_info"
+    type: str  # "user_reported" | "trend" | "google_health" | "cgm" | "nutrition" | "confirmed_memory" | "pattern" | "general_wellness_info"
     label: str
 
 
@@ -155,6 +164,54 @@ def _google_health_block(google_health: dict[str, dict[str, object]]) -> tuple[s
     )
 
 
+def _cgm_block(cgm: dict[str, object]) -> tuple[str, ContextSource] | None:
+    """Twin Core Phase 2. Describes ONLY the user's own recorded glucose
+    values and how much of the period was actually covered by readings —
+    never a medical range, never a hypo/hyperglycemia classification, never
+    a diagnosis (Constitution rule 12 / Step 7). Silently skipped if no
+    real CGM data exists (never implies zero)."""
+    if not cgm or not cgm.get("has_data"):
+        return None
+    average = cgm.get("average")
+    if average is None:
+        return None
+    unit = str(cgm.get("unit") or "").strip()
+    quality = cgm.get("data_quality")
+    coverage_days = cgm.get("coverage_days")
+    window_days = cgm.get("window_days")
+    reading_count = cgm.get("reading_count")
+    coverage_note = (
+        f", an {coverage_days} von {window_days} Tagen erfasst" if coverage_days is not None and window_days else ""
+    )
+    return (
+        f"Glukosedaten (CGM): Ø {average} {unit} basierend auf {reading_count} Messungen ({quality}){coverage_note}.",
+        ContextSource(type="cgm", label="Deine importierten CGM-Messwerte"),
+    )
+
+
+def _nutrition_block(nutrition: dict[str, dict[str, object]]) -> tuple[str, ContextSource] | None:
+    """Twin Core Phase 2. Uses only real, already-aggregated daily totals —
+    a day with zero logged entries is absent from the average (never a
+    fabricated 0 kcal/0 g day, Step 3), and this block is skipped entirely
+    if nothing was ever logged."""
+    notes = []
+    for signal, label in NUTRITION_LABELS.items():
+        data = nutrition.get(signal)
+        if not data or not data.get("has_data") or data.get("average") is None:
+            continue
+        unit = str(data.get("unit") or "").strip()
+        logged_days = data.get("logged_days")
+        window_days = data.get("window_days")
+        coverage_note = f", an {logged_days} von {window_days} Tagen erfasst" if logged_days is not None and window_days else ""
+        notes.append(f"{label}: Ø {data['average']} {unit}/Tag ({data.get('data_quality')}){coverage_note}")
+    if not notes:
+        return None
+    return (
+        f"Ernährungsdaten: {'; '.join(notes)}.",
+        ContextSource(type="nutrition", label="Deine erfassten Ernährungseinträge"),
+    )
+
+
 def _memories_block(memories: list[dict[str, object]]) -> tuple[str, ContextSource] | None:
     usable = [m for m in memories if m.get("status") in USABLE_STATUSES][:MAX_MEMORIES_IN_CONTEXT]
     if not usable:
@@ -234,18 +291,23 @@ def build_twin_context(
     daily_plan_actions: list[dict[str, object]],
     max_chars: int,
     google_health: dict[str, dict[str, object]] | None = None,
+    cgm: dict[str, object] | None = None,
+    nutrition: dict[str, dict[str, object]] | None = None,
 ) -> TwinContext:
     quality_note = _data_quality_note(daily_entry_count)
 
     # Priority order per Etappe 7 §1's own listing, with the new Google
-    # Health block placed right after trends (same conceptual tier —
-    # computed, quantitative history) and before memories/recommendations.
+    # Health/CGM/Nutrition blocks placed right after trends (same
+    # conceptual tier — computed, quantitative history) and before
+    # memories/recommendations.
     blocks = [
         _profile_block(profile),
         _goals_block(goals),
         _habits_block(habits),
         _trends_block(trends),
         _google_health_block(google_health or {}),
+        _cgm_block(cgm or {}),
+        _nutrition_block(nutrition or {}),
         _memories_block(confirmed_memories),
         _recommendations_block(active_recommendations),
         _feedback_block(feedback_summary),

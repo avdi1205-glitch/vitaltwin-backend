@@ -238,6 +238,70 @@ class TestGoogleHealthBlock:
         assert "Google Health" not in context.text
 
 
+class TestCGMBlock:
+    def test_real_data_is_included_with_source_label(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "cgm": {
+                "average": 110,
+                "data_points": 5,
+                "data_quality": "calculated",
+                "unit": "mg/dL",
+                "has_data": True,
+                "reading_count": 40,
+                "coverage_days": 5,
+                "window_days": 7,
+                "source": "cgm",
+            },
+        }
+        context = build_twin_context(**kwargs)
+        assert "Glukosedaten (CGM)" in context.text
+        assert "110" in context.text
+        assert "an 5 von 7 Tagen erfasst" in context.text
+        assert any(s.type == "cgm" for s in context.sources)
+
+    def test_no_data_is_skipped_never_reported_as_zero(self):
+        kwargs = {**EMPTY_KWARGS, "cgm": {"has_data": False, "average": None}}
+        context = build_twin_context(**kwargs)
+        assert "Glukosedaten" not in context.text
+
+    def test_missing_cgm_param_defaults_to_empty(self):
+        context = build_twin_context(**EMPTY_KWARGS)
+        assert "Glukosedaten" not in context.text
+
+
+class TestNutritionBlock:
+    def test_real_data_is_included_with_source_label(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "nutrition": {
+                "energy_intake": {
+                    "average": 2000,
+                    "data_quality": "calculated",
+                    "unit": "kcal",
+                    "has_data": True,
+                    "logged_days": 6,
+                    "window_days": 7,
+                    "source": "nutrition",
+                }
+            },
+        }
+        context = build_twin_context(**kwargs)
+        assert "Ernährungsdaten" in context.text
+        assert "Kalorien" in context.text
+        assert "an 6 von 7 Tagen erfasst" in context.text
+        assert any(s.type == "nutrition" for s in context.sources)
+
+    def test_no_data_signal_is_skipped(self):
+        kwargs = {**EMPTY_KWARGS, "nutrition": {"energy_intake": {"has_data": False, "average": None}}}
+        context = build_twin_context(**kwargs)
+        assert "Ernährungsdaten" not in context.text
+
+    def test_missing_nutrition_param_defaults_to_empty(self):
+        context = build_twin_context(**EMPTY_KWARGS)
+        assert "Ernährungsdaten" not in context.text
+
+
 class TestDailyPlanBlock:
     def test_plan_actions_are_included(self):
         kwargs = {**EMPTY_KWARGS, "daily_plan_actions": [{"description": "10 Minuten spazieren gehen"}]}

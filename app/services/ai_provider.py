@@ -56,6 +56,8 @@ ALLOWED_SOURCE_TYPES = {
     "user_reported",
     "trend",
     "google_health",
+    "cgm",
+    "nutrition",
     "confirmed_memory",
     "pattern",
     "general_wellness_info",

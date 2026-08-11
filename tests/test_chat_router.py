@@ -314,3 +314,107 @@ class TestGoogleHealthContextIntegration:
 
         assert "70" in owner_text and "99" not in owner_text
         assert "99" in member_text and "70" not in member_text
+
+
+CGM_NUTRITION_TABLES = {chat_module.CGM_TABLE, chat_module.NUTRITION_TABLE}
+
+
+class _CGMNutritionAwareSupabase(_RecordingSupabase):
+    """`vt_cgm_readings`/`vt_nutrition_entries` are `email`-keyed (unlike
+    Google Health's `user_id`-keyed tables) — this fake returns rows from a
+    per-email dataset for those 2 tables only."""
+
+    def __init__(self, cgm_by_email: dict[str, list[dict]] | None = None, nutrition_by_email: dict[str, list[dict]] | None = None):
+        super().__init__()
+        self._cgm_by_email = cgm_by_email or {}
+        self._nutrition_by_email = nutrition_by_email or {}
+
+    def table(self, name):
+        if name == chat_module.CGM_TABLE:
+            return _EmailAwareQuery(name, self.calls, self._cgm_by_email)
+        if name == chat_module.NUTRITION_TABLE:
+            return _EmailAwareQuery(name, self.calls, self._nutrition_by_email)
+        return super().table(name)
+
+
+class _EmailAwareQuery(_RecordingQuery):
+    def __init__(self, table_name, calls_log, data_by_email):
+        super().__init__(table_name, calls_log)
+        self._data_by_email = data_by_email
+        self._filtered_email = None
+
+    def eq(self, field, value):
+        super().eq(field, value)
+        if field == "email":
+            self._filtered_email = value
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=list(self._data_by_email.get(self._filtered_email, [])))
+
+
+class TestCGMNutritionContextIntegration:
+    """Twin Core Phase 2: CGM/Nutrition -> Twin Context. Every table read
+    must be scoped by the requesting user's own `email` and must never leak
+    another user's rows."""
+
+    def test_cgm_table_is_scoped_by_the_requesting_email(self, monkeypatch):
+        fake_supabase = _CGMNutritionAwareSupabase(
+            cgm_by_email={"user-a@example.com": [{"glucose_value": 110, "reading_at": "2026-08-10T08:00:00+00:00", "source": "libreview"}]}
+        )
+        monkeypatch.setattr(chat_module, "supabase", fake_supabase)
+
+        chat_module._build_context_for_user("user-a@example.com", "free")
+
+        cgm_calls = [c for c in fake_supabase.calls if c[0] == chat_module.CGM_TABLE]
+        assert ("vt_cgm_readings", "email", "user-a@example.com") in cgm_calls
+
+    def test_user_a_cgm_data_never_appears_in_user_b_context(self, monkeypatch):
+        cgm_data = {
+            "user-a@example.com": [{"glucose_value": 111.0, "reading_at": "2026-08-10T08:00:00+00:00", "source": "libreview"}],
+            "user-b@example.com": [{"glucose_value": 222.0, "reading_at": "2026-08-10T08:00:00+00:00", "source": "libreview"}],
+        }
+        monkeypatch.setattr(chat_module, "supabase", _CGMNutritionAwareSupabase(cgm_by_email=cgm_data))
+
+        text_a, _, _, _ = chat_module._build_context_for_user("user-a@example.com", "free")
+        text_b, _, _, _ = chat_module._build_context_for_user("user-b@example.com", "free")
+
+        assert "111.0" not in text_b
+        assert "222.0" not in text_a
+
+    def test_user_a_nutrition_data_never_appears_in_user_b_context(self, monkeypatch):
+        nutrition_data = {
+            "user-a@example.com": [{"calories": 1111, "protein": 0, "carbs": 0, "fat": 0, "logged_at": "2026-08-10T12:00:00+00:00"}],
+            "user-b@example.com": [{"calories": 2222, "protein": 0, "carbs": 0, "fat": 0, "logged_at": "2026-08-10T12:00:00+00:00"}],
+        }
+        monkeypatch.setattr(chat_module, "supabase", _CGMNutritionAwareSupabase(nutrition_by_email=nutrition_data))
+
+        text_a, _, _, _ = chat_module._build_context_for_user("user-a@example.com", "free")
+        text_b, _, _, _ = chat_module._build_context_for_user("user-b@example.com", "free")
+
+        assert "1111" not in text_b
+        assert "2222" not in text_a
+
+    def test_no_cgm_or_nutrition_data_yields_no_block_without_raising(self, monkeypatch):
+        monkeypatch.setattr(chat_module, "supabase", _RecordingSupabase())
+
+        text, sources, truncated, profile = chat_module._build_context_for_user("user-a@example.com", "free")
+        assert "Glukosedaten" not in text
+        assert "Ernährungsdaten" not in text
+
+    def test_family_scenario_each_members_own_email_stays_isolated(self, monkeypatch):
+        """Family membership must never grant access to another member's
+        CGM/Nutrition data — `_build_context_for_user` only ever resolves
+        the SINGLE requesting user's own email, with no Family concept
+        anywhere in this code path."""
+        cgm_data = {
+            "family-owner@example.com": [{"glucose_value": 105.0, "reading_at": "2026-08-10T08:00:00+00:00", "source": "libreview"}],
+            "family-member@example.com": [{"glucose_value": 199.0, "reading_at": "2026-08-10T08:00:00+00:00", "source": "libreview"}],
+        }
+        monkeypatch.setattr(chat_module, "supabase", _CGMNutritionAwareSupabase(cgm_by_email=cgm_data))
+
+        owner_text, _, _, _ = chat_module._build_context_for_user("family-owner@example.com", "free")
+        member_text, _, _, _ = chat_module._build_context_for_user("family-member@example.com", "free")
+
+        assert "105.0" in owner_text and "199.0" not in owner_text
+        assert "199.0" in member_text and "105.0" not in member_text

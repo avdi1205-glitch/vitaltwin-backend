@@ -36,9 +36,10 @@ it never deletes, merges, or overwrites either history.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from .trends import TrendResult, compute_trend
+from .twin_signal_shared import daily_aggregate, latest_value
 
 SOURCE_GOOGLE_HEALTH = "google_health"
 SOURCE_MANUAL_CHECKIN = "manual_checkin"
@@ -101,68 +102,22 @@ class ResolvedTrend:
     trend: TrendResult
 
 
-def _to_date(raw: object) -> date | None:
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
-    except ValueError:
-        return None
-
-
-def _daily_aggregate(rows: list[dict[str, object]], *, time_field: str, value_field: str, agg: str) -> list[dict[str, object]]:
-    """Collapses possibly-multiple-raw-records-per-day into ONE row per
-    calendar day (`entry_date` + `value`), shaped exactly like a
-    `vt_daily_wellness_entries` row so `compute_trend` can be reused
-    unmodified. Necessary because `compute_trend` weighs every row in its
-    window equally — without this pre-aggregation, a day with more raw
-    Google Health records (e.g. several hourly step buckets) would silently
-    outweigh a day with fewer, which is not a real "average per day"."""
-    buckets: dict[date, list[float]] = {}
-    for row in rows:
-        day = _to_date(row.get(time_field))
-        value = row.get(value_field)
-        if day is None or value is None:
-            continue
-        buckets.setdefault(day, []).append(float(value))
-    daily: list[dict[str, object]] = []
-    for day, values in buckets.items():
-        value = sum(values) if agg == "sum" else sum(values) / len(values)
-        daily.append({"entry_date": day.isoformat(), "value": value})
-    return daily
-
-
-def _latest(rows: list[dict[str, object]], *, time_field: str, value_field: str) -> tuple[float | None, str | None]:
-    latest_time: str | None = None
-    latest_value: float | None = None
-    for row in rows:
-        raw_time = row.get(time_field)
-        if not raw_time:
-            continue
-        if latest_time is None or str(raw_time) > latest_time:
-            candidate = row.get(value_field)
-            if candidate is not None:
-                latest_time = str(raw_time)
-                latest_value = float(candidate)
-    return latest_value, latest_time
-
-
 def build_signal(rows: list[dict[str, object]], *, signal: str, today: date, window_days: int = RECENT_WINDOW_DAYS) -> GoogleHealthSignal:
     """`rows` must already be scoped to a single user (caller's own
     Supabase query, filtered `.eq("user_id", ...)` and `.eq("data_type",
     ...)` where applicable) — this function never touches the database."""
     config = SIGNAL_CONFIG[signal]
-    daily_rows = _daily_aggregate(
+    daily_rows = daily_aggregate(
         rows, time_field=str(config["time_field"]), value_field=str(config["value_field"]), agg=str(config["agg"])
     )
     trend = compute_trend(daily_rows, field="value", window_days=window_days, today=today)
-    latest_value, latest_observed_at = _latest(rows, time_field=str(config["time_field"]), value_field=str(config["value_field"]))
+    latest_val, latest_observed_at = latest_value(rows, time_field=str(config["time_field"]), value_field=str(config["value_field"]))
     return GoogleHealthSignal(
         signal=signal,
         unit=str(config["unit"]),
         has_data=len(rows) > 0,
         data_points=len(rows),
-        latest_value=latest_value,
+        latest_value=latest_val,
         latest_observed_at=latest_observed_at,
         trend=trend,
     )
@@ -175,7 +130,7 @@ def build_baseline(rows: list[dict[str, object]], *, signal: str, today: date) -
     overlapping) — reused here via `compute_trend`'s own `end_date` param,
     not reimplemented."""
     config = SIGNAL_CONFIG[signal]
-    daily_rows = _daily_aggregate(
+    daily_rows = daily_aggregate(
         rows, time_field=str(config["time_field"]), value_field=str(config["value_field"]), agg=str(config["agg"])
     )
     baseline_end = today - timedelta(days=RECENT_WINDOW_DAYS)
@@ -219,7 +174,7 @@ def resolve_trend_source(
     every other signal has no manual counterpart, so callers should use
     `build_signal` directly for those."""
     config = SIGNAL_CONFIG[signal]
-    google_daily = _daily_aggregate(
+    google_daily = daily_aggregate(
         google_rows, time_field=str(config["time_field"]), value_field=str(config["value_field"]), agg=str(config["agg"])
     )
     google_trend = compute_trend(google_daily, field="value", window_days=window_days, today=today)
