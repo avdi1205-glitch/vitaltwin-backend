@@ -266,13 +266,39 @@ async def invite_member(data: InviteRequest, authorization: str | None = Header(
             status_code=409, detail=f"Maximale Mitgliederzahl ({MAX_FAMILY_MEMBERS}) bereits erreicht."
         )
 
+    # A previously removed/left member already has a row for this exact
+    # (family_id, user_id) pair — migration 029's `unique(family_id,
+    # user_id)` constraint means re-inviting them must UPDATE that row
+    # back to 'invited', never INSERT a second one (which would violate
+    # the constraint and fail with a real database error).
     try:
-        supabase.table(MEMBER_TABLE).insert({
-            "family_id": family_id,
-            "user_id": invitee_user_id,
-            "role": "member",
-            "status": "invited",
-        }).execute()
+        existing_rows = (
+            supabase.table(MEMBER_TABLE)
+            .select("id")
+            .eq("family_id", family_id)
+            .eq("user_id", invitee_user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        existing_rows = []
+
+    try:
+        if existing_rows:
+            supabase.table(MEMBER_TABLE).update({
+                "role": "member",
+                "status": "invited",
+                "updated_at": _now_iso(),
+            }).eq("id", existing_rows[0]["id"]).execute()
+        else:
+            supabase.table(MEMBER_TABLE).insert({
+                "family_id": family_id,
+                "user_id": invitee_user_id,
+                "role": "member",
+                "status": "invited",
+            }).execute()
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Einladung konnte nicht gespeichert werden.") from exc
 

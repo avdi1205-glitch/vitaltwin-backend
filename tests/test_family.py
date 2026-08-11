@@ -272,6 +272,32 @@ class TestRemoveAndLeave:
         assert any(u["id"] == 2 and u["email"] == "member2@example.com" for u in user_rows)
 
     @pytest.mark.anyio
+    async def test_owner_can_re_invite_a_previously_removed_member(self, fake_family_env, monkeypatch):
+        """Regression test: re-inviting to the SAME family after a removal
+        must UPDATE the existing (family_id, user_id) row, never INSERT a
+        second one (migration 029's unique constraint would reject that)."""
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
+        monkeypatch.setattr(family_module, "has_feature", lambda email, feature: True)
+        await family_module.create_family(authorization="Bearer x")
+        monkeypatch.setattr(family_module, "get_user_id_by_email", lambda email: 2)
+        await family_module.invite_member(
+            family_module.InviteRequest(email="member2@example.com"), authorization="Bearer x"
+        )
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        await family_module.accept_invitation(authorization="Bearer x")
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
+        await family_module.remove_member(2, authorization="Bearer x")
+
+        result = await family_module.invite_member(
+            family_module.InviteRequest(email="member2@example.com"), authorization="Bearer x"
+        )
+        assert result["invited"] is True
+
+        member_rows = [r for r in fake_family_env.tables[family_module.MEMBER_TABLE].rows if r["user_id"] == 2]
+        assert len(member_rows) == 1  # updated in place, not duplicated
+        assert member_rows[0]["status"] == "invited"
+
+    @pytest.mark.anyio
     async def test_member_cannot_remove_another_member(self, fake_family_env, monkeypatch):
         monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
         monkeypatch.setattr(family_module, "has_feature", lambda email, feature: True)
