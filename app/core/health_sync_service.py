@@ -135,7 +135,11 @@ async def sync_user_health_data(
             per_type_results[data_type] = {"synced": synced, "error_code": None}
             any_success = True
         except HealthIntegrationError as exc:
-            per_type_results[data_type] = {"synced": 0, "error_code": exc.code}
+            # `exc.message` is always our own generated, secret-free string
+            # (e.g. "Google Health API Fehler (404).") — surfacing it here
+            # is the only safe way to see the real Google HTTP status code
+            # for root-cause diagnosis, since it was previously discarded.
+            per_type_results[data_type] = {"synced": 0, "error_code": exc.code, "error_message": exc.message}
             any_failure = True
 
     finished_at = datetime.now(timezone.utc).isoformat()
