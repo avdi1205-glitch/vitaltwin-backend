@@ -26,6 +26,7 @@ from datetime import date
 from .personal_baseline import build_personal_baseline_report
 from .thirty_day_report import build_thirty_day_report
 from .trends import compute_trend
+from .unified_twin_state import summarize_biomarker_state
 
 CURRENT_TREND_FIELDS = ("sleep_hours", "movement_minutes", "stress", "energy", "mood")
 CURRENT_TREND_WINDOW_DAYS = 7
@@ -57,6 +58,7 @@ class AdvancedTwinOverview:
     lifestyle_simulation: dict[str, object]
     twin_status_summary: str
     disclaimer: str
+    biomarker: dict[str, object] | None = None
 
 
 def _active_goal_notes(goals: list[dict[str, object]]) -> list[str]:
@@ -82,6 +84,20 @@ def _data_quality_label(data_points: int) -> str:
     return "ausreichend"
 
 
+def _biomarker_payload(biomarker_calculations: list[dict[str, object]] | None, *, today: date) -> dict[str, object]:
+    # Independent of the check-in data_points gate — a user can have real
+    # biomarker calculations with zero check-ins.
+    summary = summarize_biomarker_state(biomarker_calculations or [], today=today)
+    return {
+        "available": summary.status == "current",
+        "biologisches_alter": summary.values.get("biologisches_alter"),
+        "differenz": summary.values.get("differenz"),
+        "markers_provided": summary.values.get("markers_provided", []),
+        "last_updated": summary.last_updated,
+        "reason": summary.explanation if summary.status != "current" else None,
+    }
+
+
 def build_advanced_twin_overview(
     *,
     entries: list[dict[str, object]],
@@ -90,9 +106,11 @@ def build_advanced_twin_overview(
     confirmed_memories: list[dict[str, object]],
     confirmed_patterns: list[dict[str, object]],
     today: date,
+    biomarker_calculations: list[dict[str, object]] | None = None,
 ) -> AdvancedTwinOverview:
     data_points = len({e.get("entry_date") for e in entries if e.get("entry_date")})
     quality = _data_quality_label(data_points)
+    biomarker = _biomarker_payload(biomarker_calculations, today=today)
 
     if data_points == 0:
         return AdvancedTwinOverview(
@@ -108,6 +126,7 @@ def build_advanced_twin_overview(
             lifestyle_simulation={"available": True, "note": LIFESTYLE_SIMULATION_NOTE},
             twin_status_summary="VitalTwin hat noch keine Daten, um deinen erweiterten Zwilling darzustellen.",
             disclaimer=DISCLAIMER,
+            biomarker=biomarker,
         )
 
     current_trends: dict[str, dict[str, object]] = {}
@@ -163,4 +182,5 @@ def build_advanced_twin_overview(
         lifestyle_simulation={"available": True, "note": LIFESTYLE_SIMULATION_NOTE},
         twin_status_summary=summary,
         disclaimer=DISCLAIMER,
+        biomarker=biomarker,
     )

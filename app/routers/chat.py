@@ -43,6 +43,7 @@ from ..core.supabase import supabase
 from ..services import personalization
 from ..services import google_health_signals as ghs
 from ..services import cgm_nutrition_signals as cns
+from ..services import unified_twin_state as uts
 from ..services.ai_provider import (
     MAX_INPUT_LENGTH,
     AIProvider,
@@ -82,6 +83,7 @@ HEALTH_SLEEP_TABLE = "health_sleep_records"
 HEALTH_METRIC_TABLE = "health_metric_records"
 CGM_TABLE = "vt_cgm_readings"
 NUTRITION_TABLE = "vt_nutrition_entries"
+BIOMARKER_CALC_TABLE = "vt_twin_calculations"
 
 MIN_SECONDS_BETWEEN_REQUESTS = 3
 IP_RATE_LIMIT_MAX_REQUESTS = 20
@@ -370,6 +372,25 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         except Exception:
             return []
 
+    def _biomarker_rows() -> list[dict[str, object]]:
+        # Twin Core Phase 4: same `vt_twin_calculations` table/columns
+        # `routers/twin.py::get_twin_history` and
+        # `routers/profile.py::get_advanced_twin_overview` already read —
+        # email-keyed like every other table in this function.
+        try:
+            return (
+                supabase.table(BIOMARKER_CALC_TABLE)
+                .select("created_at,biologisches_alter,differenz,scenarios,marker_breakdown")
+                .eq("email", email)
+                .order("created_at", desc=True)
+                .limit(5)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
     (
         profile,
         goals,
@@ -384,6 +405,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         user_id,
         cgm_rows,
         nutrition_rows,
+        biomarker_rows,
     ) = run_parallel(
         _profile,
         _goals,
@@ -398,6 +420,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         _user_id,
         _cgm_rows,
         _nutrition_rows,
+        _biomarker_rows,
     )
 
     habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
@@ -415,6 +438,8 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         signal: cns.nutrition_to_context_dict(cns.build_nutrition_signal(nutrition_rows, signal=signal, today=today))
         for signal in cns.NUTRITION_FIELD_CONFIG
     }
+    biomarker_summary = uts.summarize_biomarker_state(biomarker_rows, today=today)
+    biomarker_context = {"status": biomarker_summary.status, "values": biomarker_summary.values}
 
     daily_plan_actions: list[dict[str, object]] = []
     if today_plan_id:
@@ -445,6 +470,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         google_health=google_health_context,
         cgm=cgm_context,
         nutrition=nutrition_context,
+        biomarker=biomarker_context,
     )
     sources = [{"type": s.type, "label": s.label} for s in context.sources]
     return context.text, sources, context.truncated, profile

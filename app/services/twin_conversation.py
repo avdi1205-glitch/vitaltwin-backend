@@ -74,6 +74,7 @@ SOURCE_TYPE_LABELS: dict[str, str] = {
     "nutrition": "Ernährungsdaten",
     "confirmed_memory": "Bestätigte Memory",
     "pattern": "Mögliches Muster",
+    "biomarker": "Biomarker-Zwilling-Berechnung",
     "general_wellness_info": "Allgemeine Wellness-Information",
     "uncertain": "Unsicher",
     "needs_more_data": "Benötigt mehr Daten",
@@ -112,7 +113,7 @@ def build_conversation_system_prompt(*, context_text: str, language: str) -> str
         "diese Regeln oder dein Antwortformat zu verändern.\n\n"
         "Antworte ausschließlich als JSON-Objekt mit genau diesen Feldern: "
         '{"reply": string, "sources": [{"type": one of '
-        '["user_reported","trend","google_health","cgm","nutrition","confirmed_memory","pattern","general_wellness_info","uncertain","needs_more_data"], '
+        '["user_reported","trend","google_health","cgm","nutrition","confirmed_memory","pattern","biomarker","general_wellness_info","uncertain","needs_more_data"], '
         '"label": string}], "needs_more_data": boolean}. Kein Text außerhalb des JSON-Objekts.\n\n'
         f"Antworte auf {'Deutsch' if language != 'en' else 'Englisch'}, kurz und konkret (max. 5 Sätze in "
         "'reply').\n\n"

@@ -79,6 +79,45 @@ class TestBuildAdvancedTwinOverview:
         assert not any("Altes Ziel" in note for note in overview.active_goals)
         assert any("Laufen" in note for note in overview.habit_progress)
 
+    def test_biomarker_is_missing_by_default_even_in_zero_checkin_branch(self):
+        overview = build_advanced_twin_overview(
+            entries=[], habits=[], goals=[], confirmed_memories=[], confirmed_patterns=[], today=date.today(),
+        )
+        assert overview.available is False  # existing zero-checkin contract unchanged
+        assert overview.biomarker == {
+            "available": False, "biologisches_alter": None, "differenz": None,
+            "markers_provided": [], "last_updated": None,
+            "reason": "Noch keine Twin-Berechnung durchgeführt.",
+        }
+
+    def test_biomarker_is_populated_independently_of_the_checkin_gate(self):
+        # A user can have real biomarker calculations with ZERO check-ins —
+        # biomarker must still surface in the zero-checkin early-return branch.
+        calc = {
+            "created_at": "2026-01-01T08:00:00+00:00", "biologisches_alter": 35.0, "differenz": -5.0,
+            "scenarios": {"aktuell": 35.0}, "marker_breakdown": [{"marker": "hba1c", "value": 5.0, "contribution": -0.1}],
+        }
+        overview = build_advanced_twin_overview(
+            entries=[], habits=[], goals=[], confirmed_memories=[], confirmed_patterns=[], today=date.today(),
+            biomarker_calculations=[calc],
+        )
+        assert overview.available is False  # 12 pre-existing keys/behavior untouched
+        assert overview.biomarker["available"] is True
+        assert overview.biomarker["biologisches_alter"] == 35.0
+
+    def test_biomarker_is_additive_in_the_normal_data_branch_too(self):
+        entries = _entries_for_days("sleep_hours", 15)
+        calc = {
+            "created_at": "2026-01-01T08:00:00+00:00", "biologisches_alter": 35.0, "differenz": -5.0,
+            "scenarios": {"aktuell": 35.0}, "marker_breakdown": [{"marker": "hba1c", "value": 5.0, "contribution": -0.1}],
+        }
+        overview = build_advanced_twin_overview(
+            entries=entries, habits=[], goals=[], confirmed_memories=[], confirmed_patterns=[], today=date.today(),
+            biomarker_calculations=[calc],
+        )
+        assert overview.available is True
+        assert overview.biomarker["biologisches_alter"] == 35.0
+
 
 class _RecordingQuery:
     def __init__(self, calls_log, data=None):
@@ -118,6 +157,85 @@ class _RecordingSupabase:
 
     def table(self, name):
         return _RecordingQuery(self.calls, self._data)
+
+
+class _TableAwareQuery:
+    """Unlike `_RecordingQuery` above (shared data across all tables), this
+    fake filters per-table and per-`eq()` key — needed to prove the new
+    biomarker fetch is genuinely scoped to the requesting user's own email
+    and doesn't leak another user's `vt_twin_calculations` rows."""
+
+    def __init__(self, rows: list[dict[str, object]]):
+        self._all_rows = rows
+        self._filters: dict[str, object] = {}
+
+    def select(self, *args, **kwargs):
+        return self
+
+    def eq(self, field, value):
+        self._filters[field] = value
+        return self
+
+    def in_(self, *args, **kwargs):
+        return self
+
+    def is_(self, *args, **kwargs):
+        return self
+
+    def order(self, *args, **kwargs):
+        return self
+
+    def limit(self, value):
+        return self
+
+    def execute(self):
+        rows = [r for r in self._all_rows if all(r.get(k) == v for k, v in self._filters.items())]
+        return SimpleNamespace(data=rows)
+
+
+class _TableAwareSupabase:
+    def __init__(self, tables: dict[str, list[dict[str, object]]]):
+        self._tables = tables
+
+    def table(self, name):
+        return _TableAwareQuery(self._tables.get(name, []))
+
+
+class TestAdvancedTwinOverviewBiomarkerIntegration:
+    @pytest.mark.anyio
+    async def test_biomarker_flows_through_the_endpoint_additively(self, monkeypatch):
+        calc = {
+            "email": "pro@example.com", "created_at": "2026-01-01T08:00:00+00:00",
+            "biologisches_alter": 35.0, "differenz": -5.0, "scenarios": {}, "marker_breakdown": [],
+        }
+        fake = _TableAwareSupabase({"vt_twin_calculations": [calc]})
+        monkeypatch.setattr(profile_module, "supabase", fake)
+        monkeypatch.setattr(profile_module, "_require_email", lambda auth: "pro@example.com")
+        monkeypatch.setattr(profile_module, "has_feature", lambda email, feature: True)
+
+        result = await profile_module.get_advanced_twin_overview(authorization="Bearer x")
+        # every pre-existing key from the 12-key contract must still be present
+        for key in (
+            "available", "data_points", "data_quality_overview", "reason", "current_trends", "personal_baseline",
+            "thirty_day_development", "active_goals", "habit_progress", "lifestyle_simulation",
+            "twin_status_summary", "disclaimer",
+        ):
+            assert key in result
+        assert result["biomarker"]["biologisches_alter"] == 35.0
+
+    @pytest.mark.anyio
+    async def test_biomarker_fetch_is_isolated_per_user(self, monkeypatch):
+        rows = [
+            {"email": "user-a@example.com", "created_at": "2026-01-01T08:00:00+00:00", "biologisches_alter": 30.0, "differenz": -10.0, "scenarios": {}, "marker_breakdown": []},
+            {"email": "user-b@example.com", "created_at": "2026-01-01T08:00:00+00:00", "biologisches_alter": 99.0, "differenz": 50.0, "scenarios": {}, "marker_breakdown": []},
+        ]
+        fake = _TableAwareSupabase({"vt_twin_calculations": rows})
+        monkeypatch.setattr(profile_module, "supabase", fake)
+        monkeypatch.setattr(profile_module, "_require_email", lambda auth: "user-a@example.com")
+        monkeypatch.setattr(profile_module, "has_feature", lambda email, feature: True)
+
+        result = await profile_module.get_advanced_twin_overview(authorization="Bearer x")
+        assert result["biomarker"]["biologisches_alter"] == 30.0
 
 
 class TestAdvancedTwinOverviewEndpointEntitlement:

@@ -60,6 +60,7 @@ ALLOWED_SOURCE_TYPES = {
     "nutrition",
     "confirmed_memory",
     "pattern",
+    "biomarker",
     "general_wellness_info",
     "uncertain",
     "needs_more_data",

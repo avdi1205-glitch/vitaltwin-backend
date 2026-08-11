@@ -77,7 +77,7 @@ class ContextSource:
     """One traceable "Datengrundlage" item — surfaced to the frontend so a
     reply can be marked transparently (Etappe 7 §6), never left unlabeled."""
 
-    type: str  # "user_reported" | "trend" | "google_health" | "cgm" | "nutrition" | "confirmed_memory" | "pattern" | "general_wellness_info"
+    type: str  # "user_reported" | "trend" | "google_health" | "cgm" | "nutrition" | "confirmed_memory" | "pattern" | "biomarker" | "general_wellness_info"
     label: str
 
 
@@ -269,6 +269,28 @@ def _daily_plan_block(plan_actions: list[dict[str, object]]) -> tuple[str, Conte
     )
 
 
+def _biomarker_block(biomarker: dict[str, object] | None) -> tuple[str, ContextSource] | None:
+    """Twin Core Phase 4. `biomarker` is the plain-dict shape produced by
+    `services/unified_twin_state.py::summarize_biomarker_state` (never
+    imported here as a dataclass, same provider-agnostic convention as
+    Google Health/CGM/Nutrition above) — describes only the user's OWN
+    latest biomarker Twin calculation, reported separately from behavioral
+    trends (no causal link implied merely because both appear in one
+    context, Step 8). Silently skipped if no calculation exists."""
+    if not biomarker or biomarker.get("status") != "current":
+        return None
+    values = biomarker.get("values") or {}
+    bio_age = values.get("biologisches_alter")
+    if bio_age is None:
+        return None
+    differenz = values.get("differenz")
+    diff_note = f" (Differenz zum kalendarischen Alter: {differenz})" if differenz is not None else ""
+    return (
+        f"Letzte Twin-Berechnung (Biomarker): biologisches Alter {bio_age}{diff_note}.",
+        ContextSource(type="biomarker", label="Deine letzte Biomarker-Zwilling-Berechnung"),
+    )
+
+
 def _data_quality_note(daily_entry_count: int) -> str:
     if daily_entry_count == 0:
         return "Noch keine Check-in-Daten vorhanden."
@@ -293,13 +315,16 @@ def build_twin_context(
     google_health: dict[str, dict[str, object]] | None = None,
     cgm: dict[str, object] | None = None,
     nutrition: dict[str, dict[str, object]] | None = None,
+    biomarker: dict[str, object] | None = None,
 ) -> TwinContext:
     quality_note = _data_quality_note(daily_entry_count)
 
     # Priority order per Etappe 7 §1's own listing, with the new Google
     # Health/CGM/Nutrition blocks placed right after trends (same
     # conceptual tier — computed, quantitative history) and before
-    # memories/recommendations.
+    # memories/recommendations. Biomarker goes right after Nutrition —
+    # same tier (computed, quantitative), reported as its own separate
+    # domain rather than merged into behavioral trends.
     blocks = [
         _profile_block(profile),
         _goals_block(goals),
@@ -308,6 +333,7 @@ def build_twin_context(
         _google_health_block(google_health or {}),
         _cgm_block(cgm or {}),
         _nutrition_block(nutrition or {}),
+        _biomarker_block(biomarker),
         _memories_block(confirmed_memories),
         _recommendations_block(active_recommendations),
         _feedback_block(feedback_summary),

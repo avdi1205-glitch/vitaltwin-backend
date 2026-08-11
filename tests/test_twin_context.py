@@ -326,6 +326,42 @@ class TestNutritionBlock:
         assert "Ernährungsdaten" not in context.text
 
 
+class TestBiomarkerBlock:
+    def test_current_calculation_is_included_with_source_label(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "biomarker": {"status": "current", "values": {"biologisches_alter": 35.0, "differenz": -5.0}},
+        }
+        context = build_twin_context(**kwargs)
+        assert "Twin-Berechnung (Biomarker)" in context.text
+        assert "35.0" in context.text
+        assert any(s.type == "biomarker" for s in context.sources)
+
+    def test_missing_status_is_skipped_never_blocks_other_content(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "goals": [{"title": "Ziel", "status": "active"}],
+            "biomarker": {"status": "missing", "values": {}},
+        }
+        context = build_twin_context(**kwargs)
+        assert "Biomarker" not in context.text
+        assert "Ziel" in context.text  # other blocks unaffected by absent biomarker domain
+
+    def test_missing_biomarker_param_defaults_to_empty(self):
+        context = build_twin_context(**EMPTY_KWARGS)
+        assert "Biomarker" not in context.text
+
+    def test_respects_the_overall_context_size_limit(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "biomarker": {"status": "current", "values": {"biologisches_alter": 35.0, "differenz": -5.0}},
+            "max_chars": 10,
+        }
+        context = build_twin_context(**kwargs)
+        assert context.truncated is True
+        assert "Biomarker" not in context.text
+
+
 class TestDailyPlanBlock:
     def test_plan_actions_are_included(self):
         kwargs = {**EMPTY_KWARGS, "daily_plan_actions": [{"description": "10 Minuten spazieren gehen"}]}

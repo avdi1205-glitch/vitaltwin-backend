@@ -106,6 +106,7 @@ class TestContextQueriesAreScopedToRequestingUser:
         chat_module.RECOMMENDATION_TABLE,
         chat_module.PATTERN_TABLE,
         chat_module.DAILY_PLAN_TABLE,
+        chat_module.BIOMARKER_CALC_TABLE,
     }
 
     def test_every_expected_table_is_filtered_by_the_requesting_email(self, monkeypatch):
@@ -418,3 +419,67 @@ class TestCGMNutritionContextIntegration:
 
         assert "105.0" in owner_text and "199.0" not in owner_text
         assert "199.0" in member_text and "105.0" not in member_text
+
+
+class _BiomarkerAwareSupabase(_RecordingSupabase):
+    """`vt_twin_calculations` is `email`-keyed (same identity scheme as
+    CGM/Nutrition) — this fake returns rows from a per-email dataset for
+    that table only."""
+
+    def __init__(self, calculations_by_email: dict[str, list[dict]] | None = None):
+        super().__init__()
+        self._calculations_by_email = calculations_by_email or {}
+
+    def table(self, name):
+        if name == chat_module.BIOMARKER_CALC_TABLE:
+            return _EmailAwareQuery(name, self.calls, self._calculations_by_email)
+        return super().table(name)
+
+
+class TestBiomarkerContextIntegration:
+    """Twin Core Phase 4: Biomarker Twin -> Twin Context. Every read must be
+    scoped by the requesting user's own `email` and must never leak
+    another user's calculation."""
+
+    def test_biomarker_table_is_scoped_by_the_requesting_email(self, monkeypatch):
+        fake_supabase = _BiomarkerAwareSupabase(
+            calculations_by_email={"user-a@example.com": [{"created_at": "2026-08-10T08:00:00+00:00", "biologisches_alter": 40.0, "differenz": 0.0, "scenarios": {}, "marker_breakdown": []}]}
+        )
+        monkeypatch.setattr(chat_module, "supabase", fake_supabase)
+
+        chat_module._build_context_for_user("user-a@example.com", "free")
+
+        biomarker_calls = [c for c in fake_supabase.calls if c[0] == chat_module.BIOMARKER_CALC_TABLE]
+        assert ("vt_twin_calculations", "email", "user-a@example.com") in biomarker_calls
+
+    def test_user_a_biomarker_data_never_appears_in_user_b_context(self, monkeypatch):
+        calc_data = {
+            "user-a@example.com": [{"created_at": "2026-08-10T08:00:00+00:00", "biologisches_alter": 31.5, "differenz": -8.5, "scenarios": {}, "marker_breakdown": []}],
+            "user-b@example.com": [{"created_at": "2026-08-10T08:00:00+00:00", "biologisches_alter": 62.5, "differenz": 22.5, "scenarios": {}, "marker_breakdown": []}],
+        }
+        monkeypatch.setattr(chat_module, "supabase", _BiomarkerAwareSupabase(calculations_by_email=calc_data))
+
+        text_a, _, _, _ = chat_module._build_context_for_user("user-a@example.com", "free")
+        text_b, _, _, _ = chat_module._build_context_for_user("user-b@example.com", "free")
+
+        assert "31.5" in text_a and "62.5" not in text_a
+        assert "62.5" in text_b and "31.5" not in text_b
+
+    def test_no_calculation_yields_no_block_without_raising(self, monkeypatch):
+        monkeypatch.setattr(chat_module, "supabase", _RecordingSupabase())
+
+        text, sources, truncated, profile = chat_module._build_context_for_user("user-a@example.com", "free")
+        assert "Biomarker" not in text
+
+    def test_family_scenario_each_members_own_email_stays_isolated(self, monkeypatch):
+        calc_data = {
+            "family-owner@example.com": [{"created_at": "2026-08-10T08:00:00+00:00", "biologisches_alter": 33.0, "differenz": -7.0, "scenarios": {}, "marker_breakdown": []}],
+            "family-member@example.com": [{"created_at": "2026-08-10T08:00:00+00:00", "biologisches_alter": 55.0, "differenz": 15.0, "scenarios": {}, "marker_breakdown": []}],
+        }
+        monkeypatch.setattr(chat_module, "supabase", _BiomarkerAwareSupabase(calculations_by_email=calc_data))
+
+        owner_text, _, _, _ = chat_module._build_context_for_user("family-owner@example.com", "free")
+        member_text, _, _, _ = chat_module._build_context_for_user("family-member@example.com", "free")
+
+        assert "33.0" in owner_text and "55.0" not in owner_text
+        assert "55.0" in member_text and "33.0" not in member_text

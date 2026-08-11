@@ -48,6 +48,7 @@ MEMORY_TABLE = "vt_twin_memory"
 PATTERN_TABLE = "vt_twin_patterns"
 LEARNING_EVENT_TABLE = "vt_twin_learning_events"
 CONSENT_TABLE = "vt_consent_records"
+BIOMARKER_CALC_TABLE = "vt_twin_calculations"
 
 _CURRENT_YEAR = datetime.now(timezone.utc).year
 
@@ -985,8 +986,26 @@ async def get_advanced_twin_overview(authorization: str | None = Header(default=
         except Exception:
             return []
 
-    entries, habits_raw, habit_entries, goals, confirmed_memories, confirmed_patterns = run_parallel(
-        _daily_entries, _habits_raw, _habit_entries, _goals, _confirmed_memories, _confirmed_patterns
+    def _biomarker_calculations() -> list[dict[str, object]]:
+        # Same table/columns twin.py::get_twin_history already reads — no
+        # new query shape, just reused for the Unified Twin State's
+        # biomarker domain (Twin Core Phase 4).
+        try:
+            return (
+                supabase.table(BIOMARKER_CALC_TABLE)
+                .select("created_at,biologisches_alter,differenz,scenarios,marker_breakdown")
+                .eq("email", email)
+                .order("created_at", desc=True)
+                .limit(5)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    entries, habits_raw, habit_entries, goals, confirmed_memories, confirmed_patterns, biomarker_calculations = run_parallel(
+        _daily_entries, _habits_raw, _habit_entries, _goals, _confirmed_memories, _confirmed_patterns, _biomarker_calculations
     )
 
     entries_by_habit: dict[str, list[dict[str, object]]] = {}
@@ -1009,6 +1028,7 @@ async def get_advanced_twin_overview(authorization: str | None = Header(default=
         confirmed_memories=confirmed_memories,
         confirmed_patterns=confirmed_patterns,
         today=today,
+        biomarker_calculations=biomarker_calculations,
     )
     return {
         "available": overview.available,
@@ -1023,6 +1043,7 @@ async def get_advanced_twin_overview(authorization: str | None = Header(default=
         "lifestyle_simulation": overview.lifestyle_simulation,
         "twin_status_summary": overview.twin_status_summary,
         "disclaimer": overview.disclaimer,
+        "biomarker": overview.biomarker,
     }
 
 
