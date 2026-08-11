@@ -121,9 +121,15 @@ class TestSummarizeLearningEvent:
         assert entry.confidence_before is None
         assert entry.confidence_after is None
 
-    def test_no_contradicted_category_is_ever_emitted(self):
-        # No real event_type maps to CONTRADICTED anywhere in the module.
-        assert "CONTRADICTED" not in [v[0] for v in tlt._EVENT_TYPE_MAP.values()]
+    def test_muster_widerspruch_erkannt_maps_to_contradicted(self):
+        # Twin Core Phase 6 Part A: CONTRADICTED now has a real backing event.
+        row = _row("muster_widerspruch_erkannt", "twin_pattern")
+        entry = tlt.summarize_learning_event(row)
+        assert entry.category == "CONTRADICTED"
+        assert entry.related_domain == "pattern"
+        assert "nicht mehr" in entry.summary
+        assert "beweist" not in entry.summary.lower()
+        assert "falsch" not in entry.summary.lower()
 
 
 class TestBuildLearningTimeline:

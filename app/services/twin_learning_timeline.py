@@ -16,16 +16,19 @@ row from before email-scoping existed, or any future event type added
 without updating this module) is silently OMITTED from the customer
 timeline rather than shown as a raw/confusing entry.
 
-No "CONTRADICTED" category is emitted anywhere in this module: no existing
-call site records a pattern transitioning to `contradicting=True` on an
-already-existing row (only the initial `muster_erkannt` creation is
-recorded) — inventing that category here would fabricate history that was
-never actually written (see the Phase 5 gap report).
+No "CONTRADICTED" category was emitted in Phase 5: no call site recorded a
+pattern transitioning to `contradicting=True` on an already-existing row.
+Twin Core Phase 6 Part A closes this gap — `routers/twin_memory.py`'s
+pattern re-evaluation loop now records ONE `muster_widerspruch_erkannt`
+event on the genuine "not contradicting -> contradicting" transition (never
+repeated on unchanged re-reads), mapped here to CONTRADICTED.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from .personalization import REASON_REPEAT_THRESHOLD
 
 CATEGORY_LEARNED = "LEARNED"
 CATEGORY_CONFIRMED = "CONFIRMED"
@@ -33,6 +36,7 @@ CATEGORY_UPDATED = "UPDATED"
 CATEGORY_CORRECTED_BY_USER = "CORRECTED_BY_USER"
 CATEGORY_DISCARDED = "DISCARDED"
 CATEGORY_FEEDBACK_ADAPTATION = "FEEDBACK_ADAPTATION"
+CATEGORY_CONTRADICTED = "CONTRADICTED"
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 50
@@ -51,6 +55,7 @@ _EVENT_TYPE_MAP: dict[str, tuple[str, str]] = {
     "memory_archiviert": (CATEGORY_DISCARDED, "memory"),
     "memory_geloescht": (CATEGORY_DISCARDED, "memory"),
     "muster_verworfen": (CATEGORY_DISCARDED, "pattern"),
+    "muster_widerspruch_erkannt": (CATEGORY_CONTRADICTED, "pattern"),
     "ziel_angepasst": (CATEGORY_UPDATED, "goal"),
     "empfehlung_abgelehnt": (CATEGORY_FEEDBACK_ADAPTATION, "recommendation"),
     "empfehlung_erfolgreich": (CATEGORY_FEEDBACK_ADAPTATION, "recommendation"),
@@ -95,8 +100,36 @@ def _resolve_category_and_domain(event_type: str | None, source_type: str | None
     return _EVENT_TYPE_MAP.get(event_type or "")
 
 
+def _confidence_clause(previous_state: dict[str, object], new_state: dict[str, object]) -> str:
+    """Twin Core Phase 6 Part C: only ever shows a percentage when the
+    stored values genuinely support it — never fabricates one side."""
+    before = previous_state.get("confidence")
+    after = new_state.get("confidence")
+    before_ok = isinstance(before, (int, float))
+    after_ok = isinstance(after, (int, float))
+    if before_ok and after_ok:
+        return f" Vertrauen: {round(before * 100)}% \u2192 {round(after * 100)}%."
+    if after_ok:
+        return f" Vertrauen: {round(after * 100)}%."
+    return ""
+
+
+_REASON_CATEGORY_SENTENCES: dict[str, str] = {
+    "timing_not_suitable": "dass diese Art Empfehlung für dich wiederholt zeitlich unpassend war",
+    "too_difficult": "dass diese Art Empfehlung für dich wiederholt zu anspruchsvoll war",
+    "not_relevant": "dass diese Art Empfehlung für dich wiederholt nicht relevant war",
+    "already_doing": "dass du das bereits regelmäßig umsetzt",
+    "preference_conflict": "dass diese Art Empfehlung nicht zu deinen Vorlieben passt",
+}
+
+
 def _build_title_and_summary(
-    event_type: str, previous_state: dict[str, object], new_state: dict[str, object], reason: str | None
+    event_type: str,
+    previous_state: dict[str, object],
+    new_state: dict[str, object],
+    reason: str | None,
+    *,
+    reason_repeat_counts: dict[tuple[str, str], int] | None = None,
 ) -> tuple[str, str]:
     if event_type == "praeferenz_erkannt":
         return "Neue Präferenz erkannt", (
@@ -116,20 +149,18 @@ def _build_title_and_summary(
             else "Dein Twin hat aus deinen Daten eine neue Beobachtung gespeichert."
         )
     if event_type == "praeferenz_bestaetigt":
-        return "Präferenz bestätigt", "Nach mehreren Beobachtungen hat dein Twin diese Präferenz als bestätigt eingestuft."
+        summary = "Nach mehreren Beobachtungen hat dein Twin diese Präferenz als bestätigt eingestuft."
+        return "Präferenz bestätigt", summary + _confidence_clause(previous_state, new_state)
     if event_type == "memory_bestaetigt":
-        return "Von dir bestätigt", (
-            f"Du hast bestätigt: {reason}." if reason else "Du hast diese Beobachtung deines Twins bestätigt."
-        )
+        summary = f"Du hast bestätigt: {reason}." if reason else "Du hast diese Beobachtung deines Twins bestätigt."
+        return "Von dir bestätigt", summary + _confidence_clause(previous_state, new_state)
     if event_type == "memory_korrigiert":
         corrected = new_state.get("human_readable_value")
-        return "Von dir korrigiert", (
-            f'Du hast dies korrigiert zu: "{corrected}".' if corrected else "Du hast diese Beobachtung korrigiert."
-        )
+        summary = f'Du hast dies korrigiert zu: "{corrected}".' if corrected else "Du hast diese Beobachtung korrigiert."
+        return "Von dir korrigiert", summary + _confidence_clause(previous_state, new_state)
     if event_type == "memory_abgelehnt":
-        return "Von dir abgelehnt", (
-            f"Du hast diese Beobachtung abgelehnt: {reason}." if reason else "Du hast diese Beobachtung abgelehnt."
-        )
+        summary = f"Du hast diese Beobachtung abgelehnt: {reason}." if reason else "Du hast diese Beobachtung abgelehnt."
+        return "Von dir abgelehnt", summary + _confidence_clause(previous_state, new_state)
     if event_type == "memory_archiviert":
         return "Archiviert", (
             f"Du hast diese Beobachtung archiviert: {reason}." if reason else "Du hast diese Beobachtung archiviert."
@@ -140,6 +171,10 @@ def _build_title_and_summary(
         return "Muster verworfen", (
             f"Du hast dieses Muster verworfen: {reason}." if reason else "Du hast dieses Muster verworfen."
         )
+    if event_type == "muster_widerspruch_erkannt":
+        # Twin Core Phase 6 Part A — deterministic, non-causal wording per
+        # the task's own required example; never "this was wrong"/"proves".
+        return "Muster infrage gestellt", "Neuere Daten unterstützen ein früher erkanntes Muster derzeit nicht mehr."
     if event_type == "ziel_angepasst":
         changed_fields = [key for key in ("status", "target_value", "target_date", "title") if key in new_state]
         if "status" in changed_fields:
@@ -148,11 +183,22 @@ def _build_title_and_summary(
             return "Ziel aktualisiert", "Dein Ziel wurde angepasst."
         return "Ziel aktualisiert", "Dein Ziel wurde angepasst."
     if event_type == "empfehlung_abgelehnt":
-        return "Empfehlung abgelehnt", (
+        summary = (
             f"Du hast eine Empfehlung abgelehnt: {reason}. Dein Twin berücksichtigt dieses Feedback bei zukünftigen Empfehlungen."
             if reason
             else "Du hast eine Empfehlung abgelehnt. Dein Twin berücksichtigt dieses Feedback bei zukünftigen Empfehlungen."
         )
+        # Twin Core Phase 6 Part B — only after genuinely REPEATED evidence
+        # (never from this single event alone) does the timeline name the
+        # specific reason pattern the Twin is now accounting for.
+        category = new_state.get("category")
+        reason_category = new_state.get("reason_category")
+        if reason_repeat_counts and category and reason_category:
+            count = reason_repeat_counts.get((str(category), str(reason_category)), 0)
+            sentence = _REASON_CATEGORY_SENTENCES.get(str(reason_category))
+            if sentence and count >= REASON_REPEAT_THRESHOLD:
+                summary = f"Dein Twin berücksichtigt, {sentence}."
+        return "Empfehlung abgelehnt", summary
     if event_type == "empfehlung_erfolgreich":
         return "Empfehlung erfolgreich umgesetzt", (
             f"Du hast eine Empfehlung erfolgreich umgesetzt: {reason}." if reason else "Du hast eine Empfehlung erfolgreich umgesetzt."
@@ -160,7 +206,9 @@ def _build_title_and_summary(
     return event_type, ""
 
 
-def summarize_learning_event(row: dict[str, object]) -> LearningTimelineEntry | None:
+def summarize_learning_event(
+    row: dict[str, object], *, reason_repeat_counts: dict[tuple[str, str], int] | None = None
+) -> LearningTimelineEntry | None:
     """Maps one raw `vt_twin_learning_events` row into a customer-safe
     timeline entry, or None if this row's event_type is not a recognized,
     customer-worthy learning moment (Step 9: filter noise)."""
@@ -181,7 +229,9 @@ def summarize_learning_event(row: dict[str, object]) -> LearningTimelineEntry | 
     reason = row.get("reason")
     reason = reason if isinstance(reason, str) and reason.strip() else None
 
-    title, summary = _build_title_and_summary(str(event_type), previous_state, new_state, reason)
+    title, summary = _build_title_and_summary(
+        str(event_type), previous_state, new_state, reason, reason_repeat_counts=reason_repeat_counts
+    )
 
     confidence_before = previous_state.get("confidence")
     confidence_after = new_state.get("confidence")
@@ -212,9 +262,26 @@ def build_learning_timeline(
     rewrites the historical previous_state/new_state already captured at
     event time."""
     sorted_rows = sorted(rows, key=lambda row: str(row.get("created_at") or ""), reverse=True)
+
+    # Twin Core Phase 6 Part B: count how often the SAME (category,
+    # reason_category) pair recurs among the rows in THIS batch — repeated
+    # evidence, never a single rejection, drives the timeline's stronger
+    # wording (see `_build_title_and_summary`'s "empfehlung_abgelehnt" branch).
+    reason_repeat_counts: dict[tuple[str, str], int] = {}
+    for row in sorted_rows:
+        if row.get("event_type") != "empfehlung_abgelehnt":
+            continue
+        new_state = row.get("new_state")
+        new_state = new_state if isinstance(new_state, dict) else {}
+        category = new_state.get("category")
+        reason_category = new_state.get("reason_category")
+        if category and reason_category and reason_category != "other":
+            key = (str(category), str(reason_category))
+            reason_repeat_counts[key] = reason_repeat_counts.get(key, 0) + 1
+
     entries: list[LearningTimelineEntry] = []
     for row in sorted_rows:
-        entry = summarize_learning_event(row)
+        entry = summarize_learning_event(row, reason_repeat_counts=reason_repeat_counts)
         if entry is None:
             continue
         entry = _enrich_with_current_state(entry, row, source_ids_by_domain or {})

@@ -282,6 +282,27 @@ async def list_recommendations(authorization: str | None = Header(default=None))
     )
     habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
 
+    # Twin Core Phase 6 Part B: fetch each rejected/skipped recommendation's
+    # own free-text reason (only for THIS user's own recommendation ids,
+    # already isolated above) so `compute_category_penalty` can classify it
+    # deterministically \u2014 never fed into scoring as raw text.
+    decision_ids = [rec["id"] for rec in history if rec.get("id")]
+    decisions_by_recommendation_id: dict[str, dict[str, object]] = {}
+    if decision_ids:
+        try:
+            decision_rows = (
+                supabase.table(DECISION_TABLE)
+                .select("recommendation_id,reason")
+                .in_("recommendation_id", decision_ids)
+                .execute()
+                .data
+                or []
+            )
+            for row in decision_rows:
+                decisions_by_recommendation_id.setdefault(str(row.get("recommendation_id")), row)
+        except Exception:
+            decisions_by_recommendation_id = {}
+
     # Expire anything past valid_until that's still "proposed" (§1 status
     # lifecycle) before deciding what's currently active.
     active_existing = []
@@ -296,7 +317,9 @@ async def list_recommendations(authorization: str | None = Header(default=None))
         if rec.get("status") in ACTIVE_STATUSES:
             active_existing.append(rec)
 
-    penalties = personalization.compute_category_penalty(history)
+    penalties = personalization.compute_category_penalty(
+        history, decisions_by_recommendation_id=decisions_by_recommendation_id
+    )
     drafts = generate_recommendations(daily_entries=daily_entries, habits=habits, goals=goals, today=today)
 
     created: list[dict[str, object]] = []
@@ -370,7 +393,12 @@ async def decide_recommendation(
     )
     if data.decision in ("rejected", "skipped"):
         # Etappe 5 §4: dokumentiert als Twin Learning Event (Lernschritt),
-        # getrennt vom reinen Compliance-Audit-Log oben.
+        # getrennt vom reinen Compliance-Audit-Log oben. Twin Core Phase 6
+        # Part B: additively carries the recommendation's own category and
+        # the reason's deterministic classification so the Learning
+        # Timeline can detect genuinely REPEATED evidence without a second
+        # cross-table fetch at render time — never fed into scoring here,
+        # only stored for later explainability/aggregation.
         record_learning_event(
             user_id=None,
             email=email,
@@ -378,7 +406,11 @@ async def decide_recommendation(
             source_type="recommendation_decision",
             source_id=recommendation_id,
             previous_state={"status": recommendation.get("status")},
-            new_state={"status": data.decision},
+            new_state={
+                "status": data.decision,
+                "category": recommendation.get("category"),
+                "reason_category": personalization.classify_rejection_reason(data.reason),
+            },
             reason=data.reason,
         )
     return {"message": "Entscheidung gespeichert.", "status": data.decision}

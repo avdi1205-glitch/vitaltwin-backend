@@ -331,7 +331,7 @@ async def list_memories(authorization: str | None = Header(default=None)):
                     event_type=_creation_event_type(candidate.memory_type),
                     source_type="twin_memory",
                     source_id=str(row.get("id")),
-                    new_state={"memory_type": candidate.memory_type, "status": "candidate"},
+                    new_state={"memory_type": candidate.memory_type, "status": "candidate", "confidence": candidate.confidence},
                     reason=candidate.human_readable_value,
                 )
             continue
@@ -371,8 +371,8 @@ async def list_memories(authorization: str | None = Header(default=None)):
                 event_type="praeferenz_bestaetigt",
                 source_type="twin_memory",
                 source_id=str(existing.get("id")),
-                previous_state={"status": existing.get("status")},
-                new_state={"status": new_status},
+                previous_state={"status": existing.get("status"), "confidence": existing.get("confidence")},
+                new_state={"status": new_status, "confidence": updates.get("confidence")},
                 reason="Wiederholt beobachtet",
             )
 
@@ -439,8 +439,8 @@ async def confirm_memory(memory_id: str, data: MemoryActionInput, authorization:
         event_type="memory_bestaetigt",
         source_type="twin_memory",
         source_id=memory_id,
-        previous_state={"status": memory.get("status")},
-        new_state={"status": "confirmed"},
+        previous_state={"status": memory.get("status"), "confidence": memory.get("confidence")},
+        new_state={"status": "confirmed", "confidence": updates.get("confidence")},
         reason=data.reason,
     )
     return {**memory, **updates}
@@ -466,8 +466,8 @@ async def correct_memory(memory_id: str, data: MemoryCorrectionInput, authorizat
         event_type="memory_korrigiert",
         source_type="twin_memory",
         source_id=memory_id,
-        previous_state={"human_readable_value": memory.get("human_readable_value")},
-        new_state={"human_readable_value": data.human_readable_value},
+        previous_state={"human_readable_value": memory.get("human_readable_value"), "confidence": memory.get("confidence")},
+        new_state={"human_readable_value": data.human_readable_value, "confidence": updates.get("confidence")},
         reason=data.reason,
     )
     return {**memory, **updates}
@@ -491,8 +491,8 @@ async def reject_memory(memory_id: str, data: MemoryActionInput, authorization: 
         event_type="memory_abgelehnt",
         source_type="twin_memory",
         source_id=memory_id,
-        previous_state={"status": memory.get("status")},
-        new_state={"status": "disputed"},
+        previous_state={"status": memory.get("status"), "confidence": memory.get("confidence")},
+        new_state={"status": "disputed", "confidence": updates.get("confidence")},
         reason=data.reason,
     )
     return {**memory, **updates}
@@ -758,6 +758,7 @@ async def list_patterns(authorization: str | None = Header(default=None)):
                     reason=draft.summary,
                 )
         else:
+            was_contradicting = bool(existing.get("contradicting"))
             try:
                 supabase.table(PATTERN_TABLE).update(payload).eq("id", existing["id"]).eq("email", email).execute()
             except Exception:
@@ -767,6 +768,27 @@ async def list_patterns(authorization: str | None = Header(default=None)):
                 if row.get("id") == existing.get("id"):
                     result_rows[idx] = merged
                     break
+            if draft.contradicting and not was_contradicting:
+                # Twin Core Phase 6 Part A: record the ONE genuine
+                # "not contradicting -> contradicting" transition. Guarded by
+                # `was_contradicting` so re-running this loop on every GET
+                # (existing behavior) never re-fires once already recorded.
+                # No new pattern state, no second event on an unchanged
+                # re-read. The reverse ("contradicting" -> supported again)
+                # is deliberately NOT given its own event — `contradicting`
+                # can already flip back on its own via the next recompute,
+                # and the existing lifecycle has no "resurrection" concept
+                # to attach a second event type to.
+                record_learning_event(
+                    user_id=None,
+                    email=email,
+                    event_type="muster_widerspruch_erkannt",
+                    source_type="twin_pattern",
+                    source_id=str(existing.get("id")),
+                    previous_state={"contradicting": was_contradicting, "confidence": existing.get("confidence")},
+                    new_state={"contradicting": True, "confidence": draft.confidence},
+                    reason=draft.summary,
+                )
 
     return {"items": result_rows}
 
