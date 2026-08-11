@@ -79,6 +79,7 @@ _PREMIUM_FEATURES: frozenset[str] = _FREE_FEATURES | frozenset({
     "cgm_nutrition",  # CGM-Import + Ernährungstagebuch (routers/health.py)
     "detailed_wellness",  # "Ausführlichere Wellness-Auswertungen" — GET /api/profile/baseline
     "weekly_reports",  # "Wochenberichte" — GET /api/planning/weekly
+    "google_health",  # "Automatische Gesundheitsdaten über Google Health" — routers/google_health.py
 })
 
 # "multiple_goals" (pricing page: "Mehrere persönliche Ziele"),

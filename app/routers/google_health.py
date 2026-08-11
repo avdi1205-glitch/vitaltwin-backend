@@ -41,6 +41,7 @@ from ..core.health_errors import (
 )
 from ..core.health_normalization_service import DATA_TYPE_CONFIG
 from ..core.health_sync_service import sync_user_health_data
+from ..core.plan_service import has_feature
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
 
@@ -92,9 +93,23 @@ def _connection_public_view(connection: dict[str, object]) -> dict[str, object]:
 
 
 def _require_user_id(authorization: str | None) -> int:
+    """Shared guard for every customer-facing Google Health endpoint in this
+    file (connect/status/sync/disconnect/data access) — resolves identity
+    AND enforces the "google_health" entitlement (Premium/Pro/Family via the
+    existing `plan_service.py` FEATURE_SETS, Free denied) in one place, so
+    no endpoint can accidentally skip the check. Does NOT gate
+    `/google/callback`, which Google itself redirects to directly (no
+    Authorization header is possible there) — that boundary is already
+    covered because a Free user can never obtain a valid OAuth `state` in
+    the first place (this same guard blocks `/google/connect`)."""
     current = require_user(authorization)
     if current.user_id is None:
         raise HTTPException(status_code=401, detail="Nicht eingeloggt")
+    if not has_feature(current.email, "google_health"):
+        raise HTTPException(
+            status_code=403,
+            detail="Automatische Gesundheitsdaten über Google Health sind ein Premium-Feature. Aktiviere Premium unter /preise.",
+        )
     return current.user_id
 
 

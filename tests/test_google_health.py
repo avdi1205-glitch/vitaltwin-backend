@@ -616,6 +616,10 @@ def current_user(monkeypatch):
     user = CurrentUser(email="user@example.com", user_id=7)
     monkeypatch.setattr(router_module, "require_user", lambda authorization: user)
     monkeypatch.setattr(router_module, "enforce_rate_limit", lambda *a, **k: None)
+    # Existing behavioral tests assume an entitled (Premium+) user — the
+    # dedicated TestGoogleHealthEntitlement class below overrides this
+    # per-test to actually exercise the Free/Premium/Pro/Family boundary.
+    monkeypatch.setattr(router_module, "has_feature", lambda email, feature: True)
     return user
 
 
@@ -767,3 +771,97 @@ class TestDataEndpoints:
         with pytest.raises(HTTPException) as exc_info:
             await router_module.get_activity_data(data_type="sleep", authorization="Bearer x")
         assert exc_info.value.status_code == 400
+
+
+class TestGoogleHealthEntitlement:
+    """'Automatische Gesundheitsdaten über Google Health' (Premium/Pro/Family,
+    pricing page) — gates every customer-facing endpoint in this file via
+    the single shared `_require_user_id` guard (see its docstring). Free
+    must be denied; Premium/Pro/Family must be allowed via the existing
+    `plan_service.py` FEATURE_SETS inheritance, not per-tier duplication."""
+
+    @pytest.mark.anyio
+    async def test_free_user_denied_on_connect(self, fake_supabase, current_user, monkeypatch):
+        monkeypatch.setattr(router_module, "has_feature", lambda email, feature: False)
+        with pytest.raises(HTTPException) as exc_info:
+            await router_module.start_google_health_connect(_FakeRequest(), authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_free_user_denied_on_status(self, fake_supabase, current_user, monkeypatch):
+        monkeypatch.setattr(router_module, "has_feature", lambda email, feature: False)
+        with pytest.raises(HTTPException) as exc_info:
+            await router_module.google_health_status(authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_free_user_denied_on_sync(self, fake_supabase, current_user, monkeypatch):
+        monkeypatch.setattr(router_module, "has_feature", lambda email, feature: False)
+        with pytest.raises(HTTPException) as exc_info:
+            await router_module.google_health_sync(_FakeRequest(), authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_free_user_denied_on_data_access(self, fake_supabase, current_user, monkeypatch):
+        monkeypatch.setattr(router_module, "has_feature", lambda email, feature: False)
+        with pytest.raises(HTTPException) as exc_info:
+            await router_module.get_activity_data(authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_free_user_denied_on_disconnect(self, fake_supabase, current_user, monkeypatch):
+        monkeypatch.setattr(router_module, "has_feature", lambda email, feature: False)
+        with pytest.raises(HTTPException) as exc_info:
+            await router_module.google_health_disconnect(authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_premium_user_allowed(self, fake_supabase, current_user, monkeypatch):
+        monkeypatch.setattr(router_module, "has_feature", lambda email, feature: True)
+        result = await router_module.google_health_status(authorization="Bearer x")
+        assert result["connected"] is False
+
+    @pytest.mark.anyio
+    async def test_pro_and_family_allowed(self, fake_supabase, monkeypatch):
+        from app.core.auth import CurrentUser
+
+        monkeypatch.setattr(router_module, "enforce_rate_limit", lambda *a, **k: None)
+        monkeypatch.setattr(router_module, "has_feature", lambda email, feature: True)
+        for email in ("pro-user@example.com", "family-user@example.com"):
+            monkeypatch.setattr(router_module, "require_user", lambda auth, e=email: CurrentUser(email=e, user_id=7))
+            result = await router_module.google_health_status(authorization="Bearer x")
+            assert result["connected"] is False
+
+    @pytest.mark.anyio
+    async def test_gating_uses_the_callers_own_authenticated_email(self, fake_supabase, current_user, monkeypatch):
+        """No frontend-only lock: `has_feature` is always looked up
+        server-side from the caller's own email, never a client-supplied
+        value."""
+        seen_emails: list[str] = []
+
+        def fake_has_feature(email: str, feature: str) -> bool:
+            seen_emails.append(email)
+            return False
+
+        monkeypatch.setattr(router_module, "has_feature", fake_has_feature)
+        with pytest.raises(HTTPException):
+            await router_module.google_health_status(authorization="Bearer x")
+        assert seen_emails == ["user@example.com"]
+
+    @pytest.mark.anyio
+    async def test_status_endpoint_scopes_to_current_user_connection(self, fake_supabase, current_user):
+        """One user cannot see another user's connection status/data —
+        `repo.get_any_connection` is always scoped to the caller's own
+        `user_id`, never a client-supplied id."""
+        repo.upsert_connection(
+            user_id=99,
+            encrypted_access_token=encrypt_secret("at"),
+            encrypted_refresh_token=encrypt_secret("rt"),
+            access_token_expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            granted_scopes=[],
+            provider_health_user_id=None,
+            provider_legacy_user_id=None,
+        )
+        result = await router_module.google_health_status(authorization="Bearer x")
+        assert result["connected"] is False
+
