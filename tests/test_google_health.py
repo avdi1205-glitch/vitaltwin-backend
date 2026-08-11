@@ -425,6 +425,31 @@ class TestNormalization:
         assert row["observed_at"] == "2026-01-01T08:00:00+00:00"
         assert row["value"] == 62.0
 
+    def test_normalize_weight_point_real_shape(self):
+        """Regression test using the real (sanitized) shape returned by
+        Google for a weight data point — previously skipped because the
+        normalizer only checked top-level `sampleTime`/`value` keys, not
+        the actual nested `item["weight"]` member."""
+        row = normalize_data_point(
+            "weight",
+            {
+                "name": "dp4",
+                "dataSource": {"platform": "ANDROID", "recordingMethod": "MANUALLY_ENTERED"},
+                "weight": {
+                    "sampleTime": {
+                        "physicalTime": "2026-08-10T08:00:00Z",
+                        "civilTime": "2026-08-10T10:00:00",
+                        "utcOffset": "7200s",
+                    },
+                    "weightGrams": 82000,
+                },
+            },
+        )
+        assert row is not None
+        assert row["observed_at"] == "2026-08-10T08:00:00Z"
+        assert row["value"] == 82.0
+        assert row["unit"] == "kg"
+
     def test_unknown_data_type_returns_none(self):
         assert normalize_data_point("unknown-type", {"name": "dp"}) is None
 

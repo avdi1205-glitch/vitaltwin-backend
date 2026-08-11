@@ -65,6 +65,13 @@ def _parse_dt(value: object) -> str | None:
         return None
 
 
+def _camel_case(data_type: str) -> str:
+    """`heart-rate` -> `heartRate` — Google nests each data type's raw
+    measurement under a member named after its own camelCase identifier."""
+    first, *rest = data_type.split("-")
+    return first + "".join(part.capitalize() for part in rest)
+
+
 def normalize_data_point(data_type: str, item: dict[str, object]) -> dict[str, object] | None:
     """Converts one raw Google Health API data point into a row ready for
     the appropriate normalized table. Returns None if the item can't be
@@ -132,12 +139,33 @@ def normalize_data_point(data_type: str, item: dict[str, object]) -> dict[str, o
             "raw_metadata": item,
         }
 
-    # "metric" — single point-in-time sample
-    observed_at = _parse_dt(sample_time.get("physicalTime")) or _parse_dt(item.get("physicalTime")) or _parse_dt(
-        item.get("time")
+    # "metric" — single point-in-time sample. Google nests the actual
+    # measurement under a data-type-named member, e.g.
+    # `item["weight"] = {"sampleTime": {"physicalTime": ...}, "weightGrams": ...}`
+    # — confirmed against a real weight data point that was previously
+    # silently skipped because only generic top-level keys were checked.
+    member = item.get(_camel_case(data_type))
+    member = member if isinstance(member, dict) else {}
+    member_sample_time = member.get("sampleTime") if isinstance(member.get("sampleTime"), dict) else {}
+
+    observed_at = (
+        _parse_dt(member_sample_time.get("physicalTime"))
+        or _parse_dt(sample_time.get("physicalTime"))
+        or _parse_dt(item.get("physicalTime"))
+        or _parse_dt(item.get("time"))
     )
     if not observed_at:
         return None
+
+    metric_value = raw_value
+    if metric_value is None:
+        for key, val in member.items():
+            if isinstance(val, (int, float)):
+                # Grams member + a kg-unit data type -> exact unit conversion,
+                # not an invented value.
+                metric_value = val / 1000 if key.endswith("Grams") and config.unit == "kg" else float(val)
+                break
+
     return {
         "provider": "google_health",
         "provider_record_name": provider_record_name,
@@ -145,7 +173,7 @@ def normalize_data_point(data_type: str, item: dict[str, object]) -> dict[str, o
         "observed_at": observed_at,
         "start_time": _parse_dt(interval.get("startTime")),
         "end_time": _parse_dt(interval.get("endTime")),
-        "value": raw_value,
+        "value": metric_value,
         "unit": config.unit,
         "source_name": source_name,
         "raw_metadata": item,

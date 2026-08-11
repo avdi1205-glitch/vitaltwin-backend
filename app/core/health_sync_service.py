@@ -115,37 +115,11 @@ async def sync_user_health_data(
         try:
             table_name = TABLE_FOR_CATEGORY[_category_of(data_type)]
             synced = 0
-            skip_debug: list[dict[str, object]] = []
             async for item in client.iter_data_points(data_type=data_type, start_time=start_time, end_time=end_time):
                 counters["received"] += 1
                 normalized = normalize_data_point(data_type, item)
                 if not normalized:
                     counters["skipped"] += 1
-                    # Root-cause diagnostic: structural keys only (no values,
-                    # no tokens/identifiers) — reveals why normalization
-                    # rejected this raw point, without logging health data.
-                    # Root-cause diagnostic: structural keys only (no values,
-                    # no tokens/identifiers) — reveals why normalization
-                    # rejected this raw point, without logging health data.
-                    nested_shape: dict[str, object] = {}
-                    for k, v in item.items():
-                        if isinstance(v, dict):
-                            shape: dict[str, object] = {}
-                            for inner_k, inner_v in v.items():
-                                if isinstance(inner_v, dict):
-                                    shape[inner_k] = {"__keys__": sorted(inner_v.keys())}
-                                else:
-                                    shape[inner_k] = type(inner_v).__name__
-                                    if isinstance(inner_v, (int, float)):
-                                        shape[f"{inner_k}_gt_1000"] = inner_v > 1000
-                            nested_shape[k] = shape
-                    skip_debug.append(
-                        {
-                            "reason": "normalize_returned_none",
-                            "keys": sorted(item.keys()),
-                            "nested_shape": nested_shape,
-                        }
-                    )
                     continue
                 normalized["user_id"] = user_id
                 normalized["connection_id"] = connection_id
@@ -156,12 +130,9 @@ async def sync_user_health_data(
                     ).execute()
                     counters["created"] += 1
                     synced += 1
-                except Exception as upsert_exc:
+                except Exception:
                     counters["skipped"] += 1
-                    skip_debug.append({"reason": "upsert_failed", "detail": str(upsert_exc)[:200]})
             per_type_results[data_type] = {"synced": synced, "error_code": None}
-            if skip_debug:
-                per_type_results[data_type]["skip_debug"] = skip_debug
             any_success = True
         except HealthIntegrationError as exc:
             # `exc.message` is always our own generated, secret-free string
