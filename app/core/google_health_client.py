@@ -92,7 +92,12 @@ class GoogleHealthClient:
             raise HealthIntegrationError(HEALTH_RATE_LIMITED, "Google Health API Rate Limit erreicht.")
         if response.status_code >= 500:
             raise HealthIntegrationError(HEALTH_PROVIDER_UNAVAILABLE, "Google Health API ist derzeit nicht erreichbar.")
-        raise HealthIntegrationError(HEALTH_PROVIDER_ERROR, f"Google Health API Fehler ({response.status_code}).")
+        # Temporary root-cause diagnostic: Google's own error body is safe to
+        # include (no tokens/secrets — just its generic error reason), and is
+        # otherwise invisible anywhere the agent/founder can read it.
+        raise HealthIntegrationError(
+            HEALTH_PROVIDER_ERROR, f"Google Health API Fehler ({response.status_code}): {response.text[:300]}"
+        )
 
     async def get_identity(self) -> dict[str, object]:
         return await self._get("/users/me/identity")
