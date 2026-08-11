@@ -61,6 +61,7 @@ ALLOWED_SOURCE_TYPES = {
     "confirmed_memory",
     "pattern",
     "biomarker",
+    "twin_history",
     "general_wellness_info",
     "uncertain",
     "needs_more_data",

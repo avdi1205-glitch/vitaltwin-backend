@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..core.supabase import supabase
 from ..core.auth import require_email as _require_email_dependency
+from ..core.auth import get_user_id_by_email
 from ..core.audit import record_audit_event
 from ..core.concurrency import run_parallel
 from ..core.learning_events import record_learning_event
@@ -20,13 +21,19 @@ from ..core.validation import (
     validate_short_text,
     validate_sleep_hours,
 )
+from ..services import cgm_nutrition_signals as cns
 from ..services.habit_service import compute_habit_stats
+from ..services.advanced_twin_overview import DISCLAIMER as TWIN_DISCLAIMER
 from ..services.advanced_twin_overview import build_advanced_twin_overview
 from ..services.lifestyle_simulation import SIMULATABLE_FIELDS, simulate_metric_change
 from ..services.personal_baseline import build_personal_baseline_report
 from ..services.privacy_export import count_total_export_rows, exceeds_sync_export_limit
 from ..services.thirty_day_report import build_thirty_day_report
 from ..services.trends import compute_trend
+from ..services.unified_twin_state import build_unified_twin_state
+from ..services.twin_state_snapshot import SNAPSHOT_VERSION, build_snapshot_state, decide_snapshot_persistence, has_any_real_domain
+from ..services.twin_longitudinal_comparison import compare_behavioral_baseline, compare_snapshots
+from . import chat as _chat_router
 from ..core.plan_service import get_active_goal_limit, has_feature
 
 router = APIRouter()
@@ -49,6 +56,12 @@ PATTERN_TABLE = "vt_twin_patterns"
 LEARNING_EVENT_TABLE = "vt_twin_learning_events"
 CONSENT_TABLE = "vt_consent_records"
 BIOMARKER_CALC_TABLE = "vt_twin_calculations"
+CGM_TABLE = "vt_cgm_readings"
+NUTRITION_TABLE = "vt_nutrition_entries"
+SNAPSHOT_TABLE = "vt_twin_context_snapshots"
+# Step 8: compare against the most recent prior snapshot at least this many
+# days old -- a genuine longitudinal window, not just "yesterday".
+TWIN_EVOLUTION_BASELINE_LOOKBACK_DAYS = 30
 
 _CURRENT_YEAR = datetime.now(timezone.utc).year
 
@@ -506,6 +519,11 @@ async def export_profile(authorization: str | None = Header(default=None)):
         lambda: _load_by_recommendation_ids(RECOMMENDATION_FEEDBACK_TABLE),
     )
 
+    # Twin Core Phase 7: snapshot history belongs in the export -- it is
+    # small derived state (never raw source rows), same email-scoped read
+    # as every other category above.
+    twin_state_snapshots = _load(SNAPSHOT_TABLE)
+
     bundle = {
         "profile": profile,
         "daily_wellness_entries": daily_wellness_entries,
@@ -523,6 +541,7 @@ async def export_profile(authorization: str | None = Header(default=None)):
         "twin_memories": twin_memories,
         "twin_patterns": twin_patterns,
         "twin_learning_events": twin_learning_events,
+        "twin_state_snapshots": twin_state_snapshots,
         "consents": consents,
     }
 
@@ -1044,6 +1063,261 @@ async def get_advanced_twin_overview(authorization: str | None = Header(default=
         "twin_status_summary": overview.twin_status_summary,
         "disclaimer": overview.disclaimer,
         "biomarker": overview.biomarker,
+    }
+
+
+@router.get("/twin-evolution")
+async def get_twin_evolution(authorization: str | None = Header(default=None)):
+    """Twin Core Phase 7 -- "Wie sich dein Twin entwickelt". Builds ONE
+    fresh Unified Twin State (`services/unified_twin_state.py` -- the same
+    single source of truth every other Twin Core composition already
+    reuses, no recomputation here), turns it into a small deterministic
+    snapshot (`services/twin_state_snapshot.py`), persists it only when
+    genuinely justified (first meaningful state, or a real change vs. the
+    last stored snapshot, capped at one routine snapshot per day), and
+    returns a customer-safe longitudinal comparison against the most recent
+    earlier snapshot -- never raw JSON/internal snapshot terminology, never
+    a medical claim."""
+    email = _require_email(authorization)
+    today = date.today()
+
+    def _daily_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(DAILY_ENTRY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .order("entry_date", desc=True)
+                .limit(60)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _habits_raw() -> list[dict[str, object]]:
+        try:
+            return supabase.table(HABIT_TABLE).select("*").eq("email", email).execute().data or []
+        except Exception:
+            return []
+
+    def _habit_entries() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(HABIT_ENTRY_TABLE)
+                .select("habit_id,entry_date,completed")
+                .eq("email", email)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _goals() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(GOAL_TABLE).select("*").eq("email", email).is_("deleted_at", "null").execute().data or []
+            )
+        except Exception:
+            return []
+
+    def _confirmed_memories() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(MEMORY_TABLE)
+                .select("*")
+                .eq("email", email)
+                .in_("status", ["active", "confirmed"])
+                .is_("deleted_at", "null")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _confirmed_patterns() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(PATTERN_TABLE).select("*").eq("email", email).eq("status", "active").execute().data or []
+            )
+        except Exception:
+            return []
+
+    def _biomarker_calculations() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(BIOMARKER_CALC_TABLE)
+                .select("created_at,biologisches_alter,differenz,scenarios,marker_breakdown")
+                .eq("email", email)
+                .order("created_at", desc=True)
+                .limit(5)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _user_id() -> int | None:
+        return get_user_id_by_email(email)
+
+    since_iso = (today - timedelta(days=35)).isoformat()
+
+    def _cgm_rows() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(CGM_TABLE)
+                .select("glucose_value,reading_at,source")
+                .eq("email", email)
+                .gte("reading_at", since_iso)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _nutrition_rows() -> list[dict[str, object]]:
+        try:
+            return (
+                supabase.table(NUTRITION_TABLE)
+                .select("calories,protein,carbs,fat,logged_at")
+                .eq("email", email)
+                .gte("logged_at", since_iso)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _last_snapshot() -> dict[str, object] | None:
+        try:
+            rows = (
+                supabase.table(SNAPSHOT_TABLE)
+                .select("id,snapshot,change_summary,snapshot_version,created_at")
+                .eq("email", email)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+                .data
+            )
+            return rows[0] if rows else None
+        except Exception:
+            return None
+
+    def _baseline_comparison_snapshot() -> dict[str, object] | None:
+        try:
+            cutoff = (today - timedelta(days=TWIN_EVOLUTION_BASELINE_LOOKBACK_DAYS)).isoformat()
+            rows = (
+                supabase.table(SNAPSHOT_TABLE)
+                .select("snapshot,created_at")
+                .eq("email", email)
+                .lte("created_at", f"{cutoff}T23:59:59")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+                .data
+            )
+            return rows[0] if rows else None
+        except Exception:
+            return None
+
+    (
+        daily_entries, habits_raw, habit_entries, goals, confirmed_memories, confirmed_patterns,
+        biomarker_calculations, user_id, cgm_rows, nutrition_rows, last_snapshot, baseline_snapshot,
+    ) = run_parallel(
+        _daily_entries, _habits_raw, _habit_entries, _goals, _confirmed_memories, _confirmed_patterns,
+        _biomarker_calculations, _user_id, _cgm_rows, _nutrition_rows, _last_snapshot, _baseline_comparison_snapshot,
+    )
+
+    entries_by_habit: dict[str, list[dict[str, object]]] = {}
+    for entry in habit_entries:
+        entries_by_habit.setdefault(str(entry.get("habit_id")), []).append(entry)
+    habits = [
+        {
+            **habit,
+            **compute_habit_stats(
+                entries_by_habit.get(str(habit.get("id")), []), habit_created_at=habit.get("created_at"), today=today
+            ),
+        }
+        for habit in habits_raw
+    ]
+
+    # Reuses chat.py's existing Google Health signal orchestration verbatim
+    # -- no second implementation of the same per-signal fetch/aggregation.
+    google_health_context = _chat_router._build_google_health_context(user_id, daily_entries, today)
+    cgm_context = cns.cgm_to_context_dict(cns.build_cgm_signal(cgm_rows, today=today))
+    nutrition_context = {
+        signal: cns.nutrition_to_context_dict(cns.build_nutrition_signal(nutrition_rows, signal=signal, today=today))
+        for signal in cns.NUTRITION_FIELD_CONFIG
+    }
+
+    unified_state = build_unified_twin_state(
+        profile=None,
+        daily_entries=daily_entries,
+        goals=goals,
+        habits=habits,
+        confirmed_memories=confirmed_memories,
+        confirmed_patterns=confirmed_patterns,
+        google_health=google_health_context,
+        cgm=cgm_context,
+        nutrition=nutrition_context,
+        biomarker_calculations=biomarker_calculations,
+        today=today,
+    )
+    new_snapshot_state = build_snapshot_state(unified_state)
+
+    should_persist, changes = decide_snapshot_persistence(
+        last_snapshot_row=last_snapshot, new_snapshot_state=new_snapshot_state, today=today
+    )
+    snapshot_recorded = False
+    if should_persist:
+        try:
+            supabase.table(SNAPSHOT_TABLE).insert(
+                {
+                    "email": email,
+                    "user_id": user_id,
+                    "snapshot_version": SNAPSHOT_VERSION,
+                    "snapshot": new_snapshot_state,
+                    "change_summary": {"changes": changes},
+                    "reason": "auto",
+                }
+            ).execute()
+            snapshot_recorded = True
+        except Exception:
+            snapshot_recorded = False
+
+    comparison = compare_snapshots(
+        last_snapshot.get("snapshot") if last_snapshot else None,
+        new_snapshot_state,
+        older_created_at=last_snapshot.get("created_at") if last_snapshot else None,
+        newer_created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    baseline_history = compare_behavioral_baseline(
+        baseline_snapshot.get("snapshot") if baseline_snapshot else None, new_snapshot_state
+    )
+
+    active_domain_count = sum(
+        1 for domain in new_snapshot_state.get("domains", {}).values() if domain.get("status") != "missing"
+    )
+
+    return {
+        "available": has_any_real_domain(new_snapshot_state),
+        "active_domain_count": active_domain_count,
+        "data_quality_summary": new_snapshot_state.get("data_quality_summary"),
+        "snapshot_recorded": snapshot_recorded,
+        "comparison": {
+            "available": comparison.available,
+            "reason": comparison.reason,
+            "compared_from": comparison.compared_from,
+            "explanations": comparison.explanations,
+        },
+        "baseline_history": baseline_history,
+        "disclaimer": TWIN_DISCLAIMER,
     }
 
 

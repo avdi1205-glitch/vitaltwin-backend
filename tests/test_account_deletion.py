@@ -119,6 +119,25 @@ def test_purge_covers_twin_calculations_cgm_and_nutrition(monkeypatch):
     assert tables[account_deletion.NUTRITION_TABLE] == []
 
 
+def test_purge_covers_twin_state_snapshots(monkeypatch):
+    """Twin Core Phase 7: `vt_twin_context_snapshots` (reused for Twin State
+    Snapshots) was already listed in `_DIRECT_EMAIL_TABLES` but had no
+    `email` column until migration 033 -- confirms the purge genuinely
+    deletes rows now that the column exists."""
+    email = "user-a@example.com"
+    tables = {
+        account_deletion.CONTEXT_SNAPSHOT_TABLE: [{"id": "snap-1", "email": email}],
+        account_deletion.USER_TABLE: [{"email": email}],
+    }
+    fake = _FakeSupabase(tables)
+    monkeypatch.setattr(account_deletion, "supabase", fake)
+
+    result = account_deletion.purge_all_user_data(email)
+
+    assert result[account_deletion.CONTEXT_SNAPSHOT_TABLE] == 1
+    assert tables[account_deletion.CONTEXT_SNAPSHOT_TABLE] == []
+
+
 def test_purge_never_touches_other_users_data(monkeypatch):
     tables = {
         account_deletion.HABIT_TABLE: [

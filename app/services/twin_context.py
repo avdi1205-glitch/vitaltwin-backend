@@ -258,6 +258,23 @@ def _patterns_block(patterns: list[dict[str, object]]) -> tuple[str, ContextSour
     return summaries, ContextSource(type="pattern", label="Mögliche Muster in deinen Daten")
 
 
+def _twin_history_block(twin_history: dict[str, object] | None) -> tuple[str, ContextSource] | None:
+    """Twin Core Phase 7. Never sends raw snapshot history to the LLM --
+    only the already-computed, deterministic explanation sentences from
+    `services/twin_longitudinal_comparison.py::compare_snapshots()`.
+    Silently skipped when no earlier snapshot exists or nothing meaningful
+    changed."""
+    if not twin_history or not twin_history.get("available"):
+        return None
+    explanations = twin_history.get("explanations") or []
+    if not explanations:
+        return None
+    return (
+        f"Entwicklung seit der letzten Aufzeichnung: {' '.join(str(e) for e in explanations[:3])}",
+        ContextSource(type="twin_history", label="Wie sich dein Twin seitdem entwickelt hat"),
+    )
+
+
 def _daily_plan_block(plan_actions: list[dict[str, object]]) -> tuple[str, ContextSource] | None:
     if not plan_actions:
         return None
@@ -316,6 +333,7 @@ def build_twin_context(
     cgm: dict[str, object] | None = None,
     nutrition: dict[str, dict[str, object]] | None = None,
     biomarker: dict[str, object] | None = None,
+    twin_history: dict[str, object] | None = None,
 ) -> TwinContext:
     quality_note = _data_quality_note(daily_entry_count)
 
@@ -338,6 +356,7 @@ def build_twin_context(
         _recommendations_block(active_recommendations),
         _feedback_block(feedback_summary),
         _patterns_block(confirmed_patterns),
+        _twin_history_block(twin_history),
         _daily_plan_block(daily_plan_actions),
     ]
     blocks = [b for b in blocks if b is not None]

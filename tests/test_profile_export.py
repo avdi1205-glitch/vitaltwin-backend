@@ -67,6 +67,7 @@ EXPECTED_EXPORT_KEYS = {
     "twin_memories",
     "twin_patterns",
     "twin_learning_events",
+    "twin_state_snapshots",
     "consents",
 }
 

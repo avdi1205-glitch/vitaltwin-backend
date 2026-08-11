@@ -44,6 +44,7 @@ from ..services import personalization
 from ..services import google_health_signals as ghs
 from ..services import cgm_nutrition_signals as cns
 from ..services import unified_twin_state as uts
+from ..services import twin_longitudinal_comparison as tlc
 from ..services.ai_provider import (
     MAX_INPUT_LENGTH,
     AIProvider,
@@ -84,6 +85,7 @@ HEALTH_METRIC_TABLE = "health_metric_records"
 CGM_TABLE = "vt_cgm_readings"
 NUTRITION_TABLE = "vt_nutrition_entries"
 BIOMARKER_CALC_TABLE = "vt_twin_calculations"
+SNAPSHOT_TABLE = "vt_twin_context_snapshots"
 
 MIN_SECONDS_BETWEEN_REQUESTS = 3
 IP_RATE_LIMIT_MAX_REQUESTS = 20
@@ -391,6 +393,25 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         except Exception:
             return []
 
+    def _recent_snapshots() -> list[dict[str, object]]:
+        # Twin Core Phase 7: the 2 most recent already-persisted Twin State
+        # Snapshots -- never rebuilds a fresh Unified Twin State here, and
+        # never sends the raw snapshot JSON to the LLM (only the small
+        # deterministic comparison text built below).
+        try:
+            return (
+                supabase.table(SNAPSHOT_TABLE)
+                .select("snapshot,created_at")
+                .eq("email", email)
+                .order("created_at", desc=True)
+                .limit(2)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
     (
         profile,
         goals,
@@ -406,6 +427,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         cgm_rows,
         nutrition_rows,
         biomarker_rows,
+        recent_snapshots,
     ) = run_parallel(
         _profile,
         _goals,
@@ -421,6 +443,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         _cgm_rows,
         _nutrition_rows,
         _biomarker_rows,
+        _recent_snapshots,
     )
 
     habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
@@ -440,6 +463,16 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
     }
     biomarker_summary = uts.summarize_biomarker_state(biomarker_rows, today=today)
     biomarker_context = {"status": biomarker_summary.status, "values": biomarker_summary.values}
+
+    twin_history_context: dict[str, object] = {"available": False}
+    if len(recent_snapshots) >= 2:
+        ordered = sorted(recent_snapshots, key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        newest, previous = ordered[0], ordered[1]
+        comparison = tlc.compare_snapshots(
+            previous.get("snapshot"), newest.get("snapshot") or {},
+            older_created_at=previous.get("created_at"), newer_created_at=newest.get("created_at"),
+        )
+        twin_history_context = {"available": comparison.available, "explanations": comparison.explanations}
 
     daily_plan_actions: list[dict[str, object]] = []
     if today_plan_id:
@@ -471,6 +504,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         cgm=cgm_context,
         nutrition=nutrition_context,
         biomarker=biomarker_context,
+        twin_history=twin_history_context,
     )
     sources = [{"type": s.type, "label": s.label} for s in context.sources]
     return context.text, sources, context.truncated, profile

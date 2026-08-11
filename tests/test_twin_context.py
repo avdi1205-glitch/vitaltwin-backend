@@ -378,6 +378,32 @@ class TestDailyPlanBlock:
         assert "Original" not in context.text
 
 
+class TestTwinHistoryBlock:
+    def test_available_with_explanations_is_included(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "twin_history": {"available": True, "explanations": ["Deine durchschnittliche Schlafdauer ist von 6.0 auf 7.5 gestiegen."]},
+        }
+        context = build_twin_context(**kwargs)
+        assert "Entwicklung seit der letzten Aufzeichnung" in context.text
+        assert any(s.type == "twin_history" for s in context.sources)
+
+    def test_unavailable_is_skipped_never_blocks_other_content(self):
+        kwargs = {**EMPTY_KWARGS, "goals": [{"title": "Ziel", "status": "active"}], "twin_history": {"available": False}}
+        context = build_twin_context(**kwargs)
+        assert "Entwicklung seit der letzten Aufzeichnung" not in context.text
+        assert "Ziel" in context.text
+
+    def test_available_but_no_explanations_is_skipped(self):
+        kwargs = {**EMPTY_KWARGS, "twin_history": {"available": True, "explanations": []}}
+        context = build_twin_context(**kwargs)
+        assert "Entwicklung seit der letzten Aufzeichnung" not in context.text
+
+    def test_missing_param_defaults_to_empty(self):
+        context = build_twin_context(**EMPTY_KWARGS)
+        assert "Entwicklung seit der letzten Aufzeichnung" not in context.text
+
+
 class TestSizeCapping:
     def test_small_budget_truncates_lower_priority_blocks(self):
         kwargs = {

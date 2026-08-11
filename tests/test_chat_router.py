@@ -483,3 +483,80 @@ class TestBiomarkerContextIntegration:
 
         assert "33.0" in owner_text and "55.0" not in owner_text
         assert "55.0" in member_text and "33.0" not in member_text
+
+
+class _SnapshotAwareSupabase(_RecordingSupabase):
+    """`vt_twin_context_snapshots` is `email`-keyed (Twin Core Phase 7) —
+    returns rows from a per-email dataset for that table only."""
+
+    def __init__(self, snapshots_by_email: dict[str, list[dict]] | None = None):
+        super().__init__()
+        self._snapshots_by_email = snapshots_by_email or {}
+
+    def table(self, name):
+        if name == chat_module.SNAPSHOT_TABLE:
+            return _EmailAwareQuery(name, self.calls, self._snapshots_by_email)
+        return super().table(name)
+
+
+class TestTwinHistoryContextIntegration:
+    """Twin Core Phase 7: Twin State Snapshots -> Twin Context. Never sends
+    raw snapshot JSON to the LLM; scoped strictly by the requesting user's
+    own email."""
+
+    def test_snapshot_table_is_scoped_by_the_requesting_email(self, monkeypatch):
+        fake_supabase = _SnapshotAwareSupabase(
+            snapshots_by_email={
+                "user-a@example.com": [
+                    {"created_at": "2026-08-01T08:00:00+00:00", "snapshot": {"domains": {"behavioral_wellness": {"status": "current", "values": {"trends": {"sleep_hours": {"average": 6.0}}}}}}},
+                    {"created_at": "2026-08-10T08:00:00+00:00", "snapshot": {"domains": {"behavioral_wellness": {"status": "current", "values": {"trends": {"sleep_hours": {"average": 7.5}}}}}}},
+                ]
+            }
+        )
+        monkeypatch.setattr(chat_module, "supabase", fake_supabase)
+
+        chat_module._build_context_for_user("user-a@example.com", "free")
+
+        snapshot_calls = [c for c in fake_supabase.calls if c[0] == chat_module.SNAPSHOT_TABLE]
+        assert ("vt_twin_context_snapshots", "email", "user-a@example.com") in snapshot_calls
+
+    def test_raw_snapshot_json_never_appears_in_context_text(self, monkeypatch):
+        fake_supabase = _SnapshotAwareSupabase(
+            snapshots_by_email={
+                "user-a@example.com": [
+                    {"created_at": "2026-08-01T08:00:00+00:00", "snapshot": {"domains": {"behavioral_wellness": {"status": "current", "values": {"trends": {"sleep_hours": {"average": 6.0}}}}}}},
+                    {"created_at": "2026-08-10T08:00:00+00:00", "snapshot": {"domains": {"behavioral_wellness": {"status": "current", "values": {"trends": {"sleep_hours": {"average": 7.5}}}}}}},
+                ]
+            }
+        )
+        monkeypatch.setattr(chat_module, "supabase", fake_supabase)
+
+        text, sources, _, _ = chat_module._build_context_for_user("user-a@example.com", "free")
+        assert "domains" not in text
+        assert "gestiegen" in text
+        assert any(s["type"] == "twin_history" for s in sources)
+
+    def test_fewer_than_two_snapshots_yields_no_block(self, monkeypatch):
+        fake_supabase = _SnapshotAwareSupabase(
+            snapshots_by_email={"user-a@example.com": [{"created_at": "2026-08-10T08:00:00+00:00", "snapshot": {}}]}
+        )
+        monkeypatch.setattr(chat_module, "supabase", fake_supabase)
+
+        text, _, _, _ = chat_module._build_context_for_user("user-a@example.com", "free")
+        assert "Entwicklung seit der letzten Aufzeichnung" not in text
+
+    def test_user_a_snapshot_history_never_appears_for_user_b(self, monkeypatch):
+        data = {
+            "user-a@example.com": [
+                {"created_at": "2026-08-01T08:00:00+00:00", "snapshot": {"domains": {"behavioral_wellness": {"status": "current", "values": {"trends": {"sleep_hours": {"average": 6.0}}}}}}},
+                {"created_at": "2026-08-10T08:00:00+00:00", "snapshot": {"domains": {"behavioral_wellness": {"status": "current", "values": {"trends": {"sleep_hours": {"average": 9.0}}}}}}},
+            ],
+        }
+        monkeypatch.setattr(chat_module, "supabase", _SnapshotAwareSupabase(snapshots_by_email=data))
+
+        text_a, _, _, _ = chat_module._build_context_for_user("user-a@example.com", "free")
+        text_b, _, _, _ = chat_module._build_context_for_user("user-b@example.com", "free")
+
+        assert "gestiegen" in text_a
+        assert "Entwicklung seit der letzten Aufzeichnung" not in text_b
+
