@@ -62,6 +62,15 @@ class _FakeQuery:
         self._record("in_", *args, **kwargs)
         return self
 
+    def is_(self, *args, **kwargs):
+        self._record("is_", *args, **kwargs)
+        return self
+
+    @property
+    def not_(self):
+        self._record("not_")
+        return self
+
     def order(self, *args, **kwargs):
         self._record("order", *args, **kwargs)
         return self
@@ -473,7 +482,42 @@ class TestGetUserDetail:
         assert result["user"]["beta_access"] is False
 
 
-class TestDeletionRequests:
+class TestGetUserDetailFamilyMembership:
+    """Beta Tester Program hardening: admin must still see a preserved
+    Family membership + whether it's currently locked, reusing family.py's
+    own resolution (not a second engine)."""
+
+    @pytest.mark.anyio
+    async def test_none_when_never_in_a_family(self, monkeypatch, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {"data": [{"id": 1, "email": "user@example.com", "full_name": "User", "plan": "free", "suspended": False}]}
+        fake_supabase.store["vt_consent_records"] = {"data": []}
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": []}
+        fake_supabase.store["vt_stripe_subscriptions"] = {"data": []}
+        monkeypatch.setattr(admin_module._family_router, "_get_open_membership", lambda user_id: None)
+
+        result = await admin_module.get_user_detail("user@example.com", authorization="Bearer x")
+        assert result["user"]["family_membership"] is None
+
+    @pytest.mark.anyio
+    async def test_shows_preserved_membership_with_locked_entitlement(self, monkeypatch, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {"data": [{"id": 2, "email": "member@example.com", "full_name": "Member", "plan": "free", "suspended": False}]}
+        fake_supabase.store["vt_consent_records"] = {"data": []}
+        fake_supabase.store["vt_admin_roles"] = {"data": []}
+        fake_supabase.store["vt_login_events"] = {"data": []}
+        fake_supabase.store["vt_user_profiles"] = {"data": []}
+        fake_supabase.store["vt_stripe_subscriptions"] = {"data": []}
+        monkeypatch.setattr(
+            admin_module._family_router, "_get_open_membership",
+            lambda user_id: {"family_id": 5, "role": "member", "status": "active"},
+        )
+        monkeypatch.setattr(admin_module._family_router, "_family_entitlement_active", lambda family_id: False)
+
+        result = await admin_module.get_user_detail("member@example.com", authorization="Bearer x")
+        assert result["user"]["family_membership"] == {
+            "family_id": 5, "role": "member", "status": "active", "entitlement_active": False,
+        }
     @pytest.mark.anyio
     async def test_list_only_returns_rows_with_a_deletion_request(self, fake_supabase, permission_spy):
         fake_supabase.store["vt_user_profiles"] = {
@@ -714,6 +758,177 @@ class TestSetUserPlan:
         with pytest.raises(HTTPException) as exc_info:
             await admin_module.set_user_plan("user@example.com", PlanChangeInput(plan="pro"), authorization="Bearer x")
         assert exc_info.value.status_code == 500
+
+
+class TestBetaGrantEndpoint:
+    def test_rejects_invalid_beta_plan_value(self):
+        from app.routers.admin import BetaGrantInput
+        with pytest.raises(Exception):
+            BetaGrantInput(plan="free", days=30)
+
+    def test_rejects_out_of_range_days(self):
+        from app.routers.admin import BetaGrantInput
+        with pytest.raises(Exception):
+            BetaGrantInput(plan="pro", days=0)
+        with pytest.raises(Exception):
+            BetaGrantInput(plan="pro", days=400)
+
+    @pytest.mark.anyio
+    async def test_requires_manage_premium_permission(self, monkeypatch, fake_supabase, permission_spy):
+        from app.routers.admin import BetaGrantInput
+        fake_supabase.store["vt_users"] = {"data": [{"email": "user@example.com"}]}
+        monkeypatch.setattr(admin_module, "grant_beta_by_email", lambda email, plan, days, granted_by: True)
+        monkeypatch.setattr(admin_module, "get_beta_grant_by_email", lambda email: {"plan": "pro", "active": True})
+        await admin_module.grant_beta_access("user@example.com", BetaGrantInput(plan="pro", days=90), authorization="Bearer x")
+        assert permission_spy[-1] == ("Bearer x", "manage_premium")
+
+    @pytest.mark.anyio
+    async def test_404_when_user_not_found(self, fake_supabase, permission_spy):
+        from app.routers.admin import BetaGrantInput
+        fake_supabase.store["vt_users"] = {"data": []}
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.grant_beta_access("nobody@example.com", BetaGrantInput(plan="pro", days=90), authorization="Bearer x")
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_success_calls_grant_beta_by_email_and_records_audit_event(
+        self, monkeypatch, fake_supabase, permission_spy, recorded_audit_events
+    ):
+        from app.routers.admin import BetaGrantInput
+        fake_supabase.store["vt_users"] = {"data": [{"email": "user@example.com"}]}
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            admin_module, "grant_beta_by_email",
+            lambda email, plan, days, granted_by: (calls.append((email, plan, days, granted_by)), True)[1],
+        )
+        monkeypatch.setattr(admin_module, "get_beta_grant_by_email", lambda email: {"plan": "pro", "active": True})
+
+        result = await admin_module.grant_beta_access("user@example.com", BetaGrantInput(plan="pro", days=90), authorization="Bearer x")
+
+        assert calls == [("user@example.com", "pro", 90, "admin@example.com")]
+        assert result["beta_grant"]["plan"] == "pro"
+        assert recorded_audit_events[-1]["entity_type"] == "user_beta_grant"
+        assert recorded_audit_events[-1]["metadata"]["trigger"] == "admin_beta_grant"
+
+    @pytest.mark.anyio
+    async def test_surfaces_error_when_grant_write_fails(self, fake_supabase, permission_spy, monkeypatch):
+        from app.routers.admin import BetaGrantInput
+        fake_supabase.store["vt_users"] = {"data": [{"email": "user@example.com"}]}
+        monkeypatch.setattr(admin_module, "grant_beta_by_email", lambda email, plan, days, granted_by: False)
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.grant_beta_access("user@example.com", BetaGrantInput(plan="family", days=30), authorization="Bearer x")
+        assert exc_info.value.status_code == 500
+
+
+class TestBetaExtendEndpoint:
+    @pytest.mark.anyio
+    async def test_requires_manage_premium_permission(self, monkeypatch, permission_spy):
+        from app.routers.admin import BetaExtendInput
+        monkeypatch.setattr(admin_module, "extend_beta_by_email", lambda email, days, granted_by: {"plan": "pro", "expires_at": "x"})
+        await admin_module.extend_beta_access("user@example.com", BetaExtendInput(days=30), authorization="Bearer x")
+        assert permission_spy[-1] == ("Bearer x", "manage_premium")
+
+    @pytest.mark.anyio
+    async def test_404_when_nothing_to_extend(self, monkeypatch, permission_spy):
+        from app.routers.admin import BetaExtendInput
+        monkeypatch.setattr(admin_module, "extend_beta_by_email", lambda email, days, granted_by: None)
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.extend_beta_access("user@example.com", BetaExtendInput(days=30), authorization="Bearer x")
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_success_records_audit_event(self, monkeypatch, permission_spy, recorded_audit_events):
+        from app.routers.admin import BetaExtendInput
+        monkeypatch.setattr(
+            admin_module, "extend_beta_by_email",
+            lambda email, days, granted_by: {"plan": "family", "expires_at": "2026-12-01T00:00:00+00:00"},
+        )
+        result = await admin_module.extend_beta_access("user@example.com", BetaExtendInput(days=30), authorization="Bearer x")
+        assert result["beta_grant"]["plan"] == "family"
+        assert recorded_audit_events[-1]["entity_type"] == "user_beta_grant"
+        assert recorded_audit_events[-1]["metadata"]["trigger"] == "admin_beta_extend"
+
+
+class TestBetaRevokeEndpoint:
+    @pytest.mark.anyio
+    async def test_requires_manage_premium_permission(self, monkeypatch, permission_spy):
+        monkeypatch.setattr(admin_module, "revoke_beta_by_email", lambda email: {"plan": "pro"})
+        await admin_module.revoke_beta_access("user@example.com", authorization="Bearer x")
+        assert permission_spy[-1] == ("Bearer x", "manage_premium")
+
+    @pytest.mark.anyio
+    async def test_404_when_nothing_active(self, monkeypatch, permission_spy):
+        monkeypatch.setattr(admin_module, "revoke_beta_by_email", lambda email: None)
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_module.revoke_beta_access("user@example.com", authorization="Bearer x")
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_success_records_audit_event_with_previous_plan(self, monkeypatch, permission_spy, recorded_audit_events):
+        monkeypatch.setattr(admin_module, "revoke_beta_by_email", lambda email: {"plan": "family"})
+        result = await admin_module.revoke_beta_access("user@example.com", authorization="Bearer x")
+        assert result["email"] == "user@example.com"
+        assert recorded_audit_events[-1]["metadata"] == {"revoked_plan": "family", "trigger": "admin_beta_revoke"}
+
+
+class TestListBetaTesters:
+    @pytest.mark.anyio
+    async def test_requires_view_users_permission(self, fake_supabase, permission_spy):
+        fake_supabase.store["vt_users"] = {"data": []}
+        await admin_module.list_beta_testers(authorization="Bearer x")
+        assert permission_spy[-1] == ("Bearer x", "view_users")
+
+    @pytest.mark.anyio
+    async def test_classifies_active_expiring_and_expired(self, fake_supabase, permission_spy):
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        fake_supabase.store["vt_users"] = {
+            "data": [
+                {
+                    "email": "active@example.com", "full_name": "Active Tester", "plan": "free",
+                    "beta_plan": "pro", "beta_started_at": now.isoformat(),
+                    "beta_expires_at": (now + timedelta(days=60)).isoformat(), "beta_granted_by": "admin@example.com",
+                },
+                {
+                    "email": "soon@example.com", "full_name": "Expiring Soon", "plan": "free",
+                    "beta_plan": "family", "beta_started_at": now.isoformat(),
+                    "beta_expires_at": (now + timedelta(days=3)).isoformat(), "beta_granted_by": "admin@example.com",
+                },
+                {
+                    "email": "expired@example.com", "full_name": "Expired Tester", "plan": "free",
+                    "beta_plan": "premium", "beta_started_at": (now - timedelta(days=100)).isoformat(),
+                    "beta_expires_at": (now - timedelta(days=10)).isoformat(), "beta_granted_by": "admin@example.com",
+                },
+            ]
+        }
+        result = await admin_module.list_beta_testers(authorization="Bearer x")
+        statuses = {t["email"]: t["status"] for t in result["testers"]}
+        assert statuses["active@example.com"] == "active"
+        assert statuses["soon@example.com"] == "expiring_soon"
+        assert statuses["expired@example.com"] == "expired"
+        assert result["summary"]["total"] == 3
+        assert result["summary"]["pro_beta"] == 1
+        assert result["summary"]["family_beta"] == 1
+        assert result["summary"]["expired"] == 1
+
+    @pytest.mark.anyio
+    async def test_never_exposes_wellness_data_fields(self, fake_supabase, permission_spy):
+        """DSGVO/privacy boundary: this overview must only ever contain
+        access-management metadata — never health/wellness data, even if
+        a caller accidentally widened the select elsewhere."""
+        fake_supabase.store["vt_users"] = {
+            "data": [
+                {
+                    "email": "x@example.com", "full_name": "X", "plan": "free", "beta_plan": "pro",
+                    "beta_started_at": "2026-01-01T00:00:00+00:00", "beta_expires_at": "2026-04-01T00:00:00+00:00",
+                    "beta_granted_by": "admin@example.com",
+                }
+            ]
+        }
+        result = await admin_module.list_beta_testers(authorization="Bearer x")
+        allowed_keys = {"email", "full_name", "real_plan", "beta_plan", "beta_started_at", "beta_expires_at", "beta_granted_by", "status", "remaining_days"}
+        assert set(result["testers"][0].keys()) <= allowed_keys
 
 
 class TestQACleanup:

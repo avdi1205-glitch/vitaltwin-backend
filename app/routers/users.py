@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from ..core.supabase import supabase
 from ..core.rate_limit import enforce_rate_limit
-from ..core.plan_service import get_plan_by_email
+from ..core.plan_service import get_beta_grant_by_email, get_effective_plan_by_email, get_plan_by_email
 
 router = APIRouter()
 
@@ -480,13 +480,14 @@ async def login(req: LoginRequest, request: Request):
     token = _create_access_token(email)
     _record_login_event(email=email, success=True, request=request)
 
-    # Real, uncached read (see `core/plan_service.py::get_plan_by_email`) —
-    # `user` here can be a stale in-process cache entry (`_get_user`'s
-    # `users_store`) that no longer matches the DB after an out-of-process
-    # plan change (admin Tarif-Wechsel, Stripe webhook); the login response
-    # must never show a premium/plan value that disagrees with what
-    # `/api/chat/status` and `/api/profile/trends` actually enforce.
-    plan = get_plan_by_email(email)
+    # Real, uncached, Beta-aware read (see `core/plan_service.py::
+    # get_effective_plan_by_email`) — `user` here can be a stale in-process
+    # cache entry (`_get_user`'s `users_store`) that no longer matches the
+    # DB after an out-of-process plan change (admin Tarif-Wechsel, Stripe
+    # webhook, Beta grant/revoke); the login response must never show a
+    # premium/plan value that disagrees with what `/api/chat/status`/
+    # `/api/profile/trends` actually enforce.
+    plan = get_effective_plan_by_email(email)
     return {
         "access_token": token,
         "message": "Login erfolgreich",
@@ -517,8 +518,8 @@ async def google_login(req: GoogleLoginRequest):
 
     token = _create_access_token(email)
 
-    # Real, uncached read — see the same comment in `/login` above.
-    plan = get_plan_by_email(email)
+    # Real, uncached, Beta-aware read — see the same comment in `/login` above.
+    plan = get_effective_plan_by_email(email)
     return {
         "access_token": token,
         "message": "Login erfolgreich",
@@ -578,7 +579,17 @@ async def me(authorization: str | None = Header(default=None)):
     # here while `/api/chat/status`/`/api/profile/trends` (both already
     # uncached) correctly enforced "free" — `/me` must never be the one
     # stale source of truth.
-    plan = get_plan_by_email(email)
+    #
+    # Beta Tester Program: `plan` is the EFFECTIVE plan (real plan OR an
+    # active Beta grant, whichever ranks higher) so every existing
+    # client-side `profile.plan === 'pro'`/`'family'` check already
+    # sprinkled across the frontend keeps working correctly for Beta
+    # testers with zero extra per-page changes. `real_plan` + `beta` expose
+    # the underlying truth separately, purely for the "Pro · Beta-Tester"
+    # label — never used for entitlement decisions on their own.
+    real_plan = get_plan_by_email(email)
+    beta_grant = get_beta_grant_by_email(email)
+    plan = get_effective_plan_by_email(email)
     premium = plan != "free"
     starter_calc_remaining: int | None = None
     if not premium:
@@ -589,6 +600,16 @@ async def me(authorization: str | None = Header(default=None)):
         "full_name": user.get("full_name"),
         "premium": premium,
         "plan": plan,
+        "real_plan": real_plan,
+        "beta": (
+            {
+                "plan": beta_grant["plan"],
+                "expires_at": beta_grant["expires_at"],
+                "remaining_days": beta_grant["remaining_days"],
+            }
+            if beta_grant and beta_grant["active"]
+            else None
+        ),
         "starter_calc_remaining": starter_calc_remaining,
     }
 

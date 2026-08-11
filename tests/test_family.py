@@ -789,3 +789,184 @@ class TestFamilyChallengesPrivacy:
         assert set(result["created_by"].keys()) == {"email", "display_name"}
 
 
+class TestFamilyBetaEntitlementLock:
+    """Beta Tester Program hardening: an existing Family's membership/data
+    must survive the OWNER's entitlement (real paid plan OR Beta grant)
+    expiring or being revoked — only customer FEATURE USAGE is locked,
+    never the underlying rows. `has_feature` is keyed by OWNER email only
+    (member's own plan is irrelevant, by design) via a small dict-backed
+    fake so "active"/"expired"/"revoked"/"re-granted"/"paid" can all be
+    simulated just by flipping one entry."""
+
+    async def _setup(self, monkeypatch, fake_family_env, owner_entitled: bool = True):
+        """Always CREATES the family with entitlement active (you cannot
+        create one otherwise) — `owner_entitled` only decides the state
+        AFTER real data (membership/goal/challenge) already exists, so
+        tests can simulate "already-locked family with real preserved
+        data", not an impossible "created while locked" state."""
+        entitlement = {"owner@example.com": True}
+        monkeypatch.setattr(family_module, "has_feature", lambda email, feature: entitlement.get(email, False))
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
+        await family_module.create_family(authorization="Bearer x")
+        monkeypatch.setattr(family_module, "get_user_id_by_email", lambda email: 2)
+        await family_module.invite_member(family_module.InviteRequest(email="member2@example.com"), authorization="Bearer x")
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        await family_module.accept_invitation(authorization="Bearer x")
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
+        goal = await family_module.create_family_goal(
+            family_module.FamilyGoalCreate(title="Gemeinsames Ziel"), authorization="Bearer x"
+        )
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Gemeinsame Challenge"), authorization="Bearer x"
+        )
+        entitlement["owner@example.com"] = owner_entitled
+        return entitlement, goal, challenge
+
+    @pytest.mark.anyio
+    async def test_active_family_beta_owner_can_use_goals_and_challenges(self, fake_family_env, monkeypatch):
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+
+        goals_result = await family_module.list_family_goals(authorization="Bearer x")
+        assert len(goals_result["goals"]) == 1
+        joined = await family_module.join_family_goal(goal["id"], authorization="Bearer x")
+        assert any(p["user_id"] == 2 for p in joined["participants"])
+        challenges_result = await family_module.list_family_challenges(authorization="Bearer x")
+        assert len(challenges_result["challenges"]) == 1
+
+    @pytest.mark.anyio
+    async def test_expired_family_beta_locks_goals_and_challenges_for_member(self, fake_family_env, monkeypatch):
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        entitlement["owner@example.com"] = False  # simulates expiry/revocation
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.list_family_goals(authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.join_family_challenge(challenge["id"], authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_expired_family_beta_locks_goals_and_challenges_for_owner_too(self, fake_family_env, monkeypatch):
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        entitlement["owner@example.com"] = False
+
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.list_family_goals(authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_expired_family_beta_locks_invite_accept_remove(self, fake_family_env, monkeypatch):
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        entitlement["owner@example.com"] = False
+        monkeypatch.setattr(family_module, "get_user_id_by_email", lambda email: 3)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.invite_member(family_module.InviteRequest(email="member3@example.com"), authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.remove_member(2, authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_underlying_paid_family_unaffected_by_a_separate_expired_lower_grant(self, fake_family_env, monkeypatch):
+        """A real paying Family customer's access must never be gated by
+        some OTHER expired grant concept — `has_feature` returning True
+        (the effective-plan result, real OR Beta) is the only thing that
+        matters here, regardless of why it's True."""
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        result = await family_module.list_family_goals(authorization="Bearer x")
+        assert len(result["goals"]) == 1
+
+    @pytest.mark.anyio
+    async def test_lock_does_not_delete_goals_challenges_or_members(self, fake_family_env, monkeypatch):
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        entitlement["owner@example.com"] = False
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+
+        with pytest.raises(HTTPException):
+            await family_module.list_family_goals(authorization="Bearer x")
+
+        assert len(fake_family_env.tables[family_module.GOAL_TABLE].rows) == 1
+        assert len(fake_family_env.tables[family_module.CHALLENGE_TABLE].rows) == 1
+        member_rows = [r for r in fake_family_env.tables[family_module.MEMBER_TABLE].rows if r.get("status") in ("active", "invited")]
+        assert len(member_rows) == 2
+
+    @pytest.mark.anyio
+    async def test_membership_view_stays_visible_and_honestly_flags_locked_state(self, fake_family_env, monkeypatch):
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        entitlement["owner@example.com"] = False
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+
+        result = await family_module.get_my_family(authorization="Bearer x")
+        assert result["in_family"] is True
+        assert len(result["members"]) == 2  # roster never hidden/deleted
+        assert result["family_entitlement_active"] is False
+
+    @pytest.mark.anyio
+    async def test_leave_family_remains_available_while_locked(self, fake_family_env, monkeypatch):
+        """Privacy/user-control action: a member must never be trapped in
+        a Family just because the owner's entitlement lapsed."""
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        entitlement["owner@example.com"] = False
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+
+        result = await family_module.leave_family(authorization="Bearer x")
+        assert result["left"] is True
+
+    @pytest.mark.anyio
+    async def test_regrant_restores_access_to_the_same_preserved_data(self, fake_family_env, monkeypatch):
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        entitlement["owner@example.com"] = False
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        with pytest.raises(HTTPException):
+            await family_module.list_family_goals(authorization="Bearer x")
+
+        entitlement["owner@example.com"] = True  # re-grant / renewed paid plan
+        result = await family_module.list_family_goals(authorization="Bearer x")
+        assert len(result["goals"]) == 1
+        assert result["goals"][0]["id"] == goal["id"]  # same row, never recreated
+
+    @pytest.mark.anyio
+    async def test_paid_family_reactivation_restores_access_too(self, fake_family_env, monkeypatch):
+        """Same mechanism whether the owner re-subscribes to a real paid
+        Family plan or gets re-granted Beta — `has_feature` is the single
+        source of truth either way, no separate code path needed."""
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=False)
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        with pytest.raises(HTTPException):
+            await family_module.list_family_goals(authorization="Bearer x")
+
+        entitlement["owner@example.com"] = True
+        result = await family_module.list_family_goals(authorization="Bearer x")
+        assert len(result["goals"]) == 1
+
+    @pytest.mark.anyio
+    async def test_user_a_family_lock_never_leaks_into_user_b_family(self, fake_family_env, monkeypatch):
+        """Isolation regression: Family A's expired entitlement must not
+        affect an entirely separate Family B."""
+        entitlement, goal, challenge = await self._setup(monkeypatch, fake_family_env, owner_entitled=True)
+        entitlement["owner@example.com"] = False
+
+        fake_family_env.seed_user(10, "owner-b@example.com")
+        entitlement["owner-b@example.com"] = True
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(10, "owner-b@example.com"))
+        result_b = await family_module.create_family(authorization="Bearer x")
+        assert result_b["in_family"] is True
+        goals_b = await family_module.list_family_goals(authorization="Bearer x")
+        assert goals_b["goals"] == []  # Family B genuinely has none — not Family A's leaking through
+
+    @pytest.mark.anyio
+    async def test_no_stripe_fields_exist_or_are_touched_anywhere_in_this_module(self, fake_family_env, monkeypatch):
+        """Family Beta hardening must never touch Stripe — confirmed by
+        the module simply having no Stripe import/reference at all."""
+        import inspect
+        source = inspect.getsource(family_module)
+        assert "stripe" not in source.lower()
+
+
+

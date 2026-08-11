@@ -44,13 +44,22 @@ from ..core.founder_backup_status import get_latest_backup_status, list_backups,
 from ..core.founder_releases import get_latest_release, list_releases, record_release
 from ..core.integrations import get_full_integration_report
 from ..core.plans import get_configured_price_id
-from ..core.plan_service import normalize_plan_row, set_plan_by_email
+from ..core.plan_service import (
+    BETA_PLAN_VALUES,
+    extend_beta_by_email,
+    get_beta_grant_by_email,
+    grant_beta_by_email,
+    normalize_plan_row,
+    revoke_beta_by_email,
+    set_plan_by_email,
+)
 from ..core.rate_limit import enforce_rate_limit
 from ..core import stripe_billing
 from ..core.supabase import supabase
 from ..core.webhook_auth import require_webhook_secret
 from ..services.privacy_export import resolve_current_consents
 from .users import set_premium_by_email
+from . import family as _family_router
 
 router = APIRouter()
 
@@ -70,6 +79,26 @@ TWIN_MEMORY_TABLE = "vt_twin_memory"
 TWIN_LEARNING_EVENTS_TABLE = "vt_twin_learning_events"
 RECOMMENDATION_FEEDBACK_TABLE = "vt_recommendation_feedback"
 BETA_APPLICATION_TABLE = "vt_beta_applications"
+
+
+def _get_family_membership_summary(user_id: int) -> dict[str, object] | None:
+    """Beta Tester Program hardening: admin-facing view of a PRESERVED
+    Family membership (never deleted by an expired/revoked grant) — reuses
+    `family.py`'s own membership lookup and entitlement-lock resolution
+    directly (router-to-router import, same established pattern as
+    `profile.py` reusing `chat.py`'s Google Health context builder) rather
+    than a second implementation. Returns `None` if the user has never
+    been in a Family at all."""
+    membership = _family_router._get_open_membership(user_id)
+    if not membership:
+        return None
+    family_id = int(membership["family_id"])
+    return {
+        "family_id": family_id,
+        "role": membership.get("role"),
+        "status": membership.get("status"),
+        "entitlement_active": _family_router._family_entitlement_active(family_id),
+    }
 STRIPE_SUBSCRIPTION_TABLE = "vt_stripe_subscriptions"
 
 MAX_PAGE_SIZE = 100
@@ -157,6 +186,40 @@ class PlanChangeInput(BaseModel):
     def _validate_plan(cls, value: str) -> str:
         if value not in {"free", "premium", "pro", "family"}:
             raise ValueError("Ungültiger Tarif. Erlaubt: free, premium, pro, family")
+        return value
+
+
+class BetaGrantInput(BaseModel):
+    """Beta Tester Program: grants a NEW temporary Pro/Family/Premium
+    overlay — never touches the real `plan`/Stripe state (see
+    `core/plan_service.py::grant_beta_by_email`)."""
+
+    plan: str
+    days: int
+
+    @field_validator("plan")
+    @classmethod
+    def _validate_plan(cls, value: str) -> str:
+        if value not in BETA_PLAN_VALUES:
+            raise ValueError(f"Ungültiger Beta-Tarif. Erlaubt: {', '.join(sorted(BETA_PLAN_VALUES))}")
+        return value
+
+    @field_validator("days")
+    @classmethod
+    def _validate_days(cls, value: int) -> int:
+        if not (1 <= value <= 365):
+            raise ValueError("Beta-Dauer muss zwischen 1 und 365 Tagen liegen.")
+        return value
+
+
+class BetaExtendInput(BaseModel):
+    days: int
+
+    @field_validator("days")
+    @classmethod
+    def _validate_days(cls, value: int) -> int:
+        if not (1 <= value <= 365):
+            raise ValueError("Verlängerung muss zwischen 1 und 365 Tagen liegen.")
         return value
 
 
@@ -571,12 +634,23 @@ async def get_user_detail(email: str, authorization: str | None = Header(default
     plan = normalize_plan_row(user)
     user["plan"] = plan
     user["status"] = _compute_account_status(suspended=bool(user.get("suspended")), deletion_requested_at=deletion_requested_at)
-    # "Beta-Zugang" isn't a stored flag (no such column exists) — inferred
-    # honestly from real data: a paid-tier account with NO Stripe
-    # subscription row at all can only have gotten there via the free
-    # Beta-Zugang self-service activation (the only other path besides an
-    # admin/founder manually setting the plan) — never fabricated.
+    # "Beta-Zugang" (legacy Free Beta activation, no dedicated columns for
+    # it) isn't a stored flag — inferred honestly from real data: a
+    # paid-tier account with NO Stripe subscription row at all can only
+    # have gotten there via the free Beta-Zugang self-service activation
+    # (the only other path besides an admin/founder manually setting the
+    # plan) — never fabricated.
     user["beta_access"] = plan != "free" and not subscription_rows
+    # Beta Tester Program (admin-controlled, time-limited Pro/Family/Premium
+    # grant) — a SEPARATE, explicit overlay on top of the real `plan`
+    # above; `None` if this user has never had one / it was fully revoked.
+    user["beta_grant"] = get_beta_grant_by_email(email)
+    # Beta Tester Program hardening: preserved Family membership (rows are
+    # NEVER deleted by an expired/revoked grant) + whether Family customer
+    # functionality is currently locked — reuses `family.py`'s own
+    # entitlement-lock resolution (same effective-plan/has_feature call),
+    # never a second authorization engine.
+    user["family_membership"] = _get_family_membership_summary(int(user["id"])) if user.get("id") is not None else None
 
     return {
         "user": user,
@@ -766,6 +840,150 @@ async def set_user_plan(email: str, data: PlanChangeInput, authorization: str | 
         metadata={"plan": data.plan, "trigger": "admin_manual_override"},
     )
     return {"message": "Tarif administrativ aktualisiert.", "email": email, "plan": data.plan}
+
+
+@router.post("/users/{email}/beta/grant")
+async def grant_beta_access(email: str, data: BetaGrantInput, authorization: str | None = Header(default=None)):
+    """Beta Tester Program: grants a new temporary Pro/Family/Premium
+    overlay to `email`, starting now, for `data.days` days — REPLACES any
+    previous grant for this user (never stacks). Never touches the real
+    `plan`/`premium` column or any Stripe data (see
+    `core/plan_service.py::grant_beta_by_email`) — the underlying paid/free
+    plan is completely unaffected either way, so a founder can safely grant
+    e.g. Pro Beta to a Free user or a Premium-paying customer alike."""
+    admin = require_admin_permission(authorization, "manage_premium")
+    email = email.strip().lower()
+    try:
+        existing = supabase.table(USER_TABLE).select("email").eq("email", email).limit(1).execute().data or []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Nutzer konnte nicht geladen werden.") from exc
+    if not existing:
+        raise HTTPException(status_code=404, detail="Nutzer nicht gefunden.")
+
+    updated = grant_beta_by_email(email, data.plan, data.days, granted_by=admin.email)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Beta-Zugang konnte nicht gewährt werden.")
+
+    grant = get_beta_grant_by_email(email)
+    record_audit_event(
+        user_id=None, email=admin.email, action="update", entity_type="user_beta_grant", entity_id=email,
+        metadata={"beta_plan": data.plan, "days": data.days, "trigger": "admin_beta_grant"},
+    )
+    return {"message": "Beta-Zugang gewährt.", "email": email, "beta_grant": grant}
+
+
+@router.post("/users/{email}/beta/extend")
+async def extend_beta_access(email: str, data: BetaExtendInput, authorization: str | None = Header(default=None)):
+    """Extends an EXISTING Beta grant by `data.days` (from whichever is
+    later of "now" and the current expiry). 404 if the user has no active
+    or previous grant at all — use `/beta/grant` first in that case."""
+    admin = require_admin_permission(authorization, "manage_premium")
+    email = email.strip().lower()
+
+    updated = extend_beta_by_email(email, data.days, granted_by=admin.email)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Kein Beta-Zugang zum Verlängern vorhanden.")
+
+    record_audit_event(
+        user_id=None, email=admin.email, action="update", entity_type="user_beta_grant", entity_id=email,
+        metadata={"days_added": data.days, "new_expires_at": updated.get("expires_at"), "trigger": "admin_beta_extend"},
+    )
+    return {"message": "Beta-Zugang verlängert.", "email": email, "beta_grant": updated}
+
+
+@router.post("/users/{email}/beta/revoke")
+async def revoke_beta_access(email: str, authorization: str | None = Header(default=None)):
+    """Immediately ends the Beta overlay — the user falls back to their
+    real underlying `plan` on their very next request. Deletes NO user
+    data, does NOT touch Stripe, does NOT touch Family memberships (a
+    revoked Family Beta tester simply loses Family-exclusive gating like
+    `family_profiles`/`family_goals`/`family_challenges` again; any Family
+    they already belong to and its data is untouched — see the Family Beta
+    section of the implementation report)."""
+    admin = require_admin_permission(authorization, "manage_premium")
+    email = email.strip().lower()
+
+    previous = revoke_beta_by_email(email)
+    if previous is None:
+        raise HTTPException(status_code=404, detail="Kein aktiver Beta-Zugang vorhanden.")
+
+    record_audit_event(
+        user_id=None, email=admin.email, action="update", entity_type="user_beta_grant", entity_id=email,
+        metadata={"revoked_plan": previous.get("plan"), "trigger": "admin_beta_revoke"},
+    )
+    return {"message": "Beta-Zugang widerrufen.", "email": email}
+
+
+@router.get("/beta-testers")
+async def list_beta_testers(authorization: str | None = Header(default=None)):
+    """Small, focused Beta Tester overview (Beta Tester Program) —
+    deliberately NOT a CRM: just enough to answer "who is currently
+    testing and when does their access expire?". Shows only
+    access-management metadata (email/name/tier/dates/who granted it) —
+    never wellness/health data, matching the DSGVO/privacy boundary for
+    this feature."""
+    require_admin_permission(authorization, "view_users")
+
+    try:
+        rows = (
+            supabase.table(USER_TABLE)
+            .select("email,full_name,plan,beta_plan,beta_started_at,beta_expires_at,beta_granted_by")
+            .not_.is_("beta_plan", "null")
+            .order("beta_expires_at")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
+
+    now = datetime.now(timezone.utc)
+    testers: list[dict[str, object]] = []
+    for row in rows:
+        expires_raw = row.get("beta_expires_at")
+        try:
+            expires_at = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00")) if expires_raw else None
+        except Exception:
+            expires_at = None
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if not expires_at:
+            status = "unknown"
+            remaining_days = None
+        else:
+            remaining_days = (expires_at - now).days
+            if expires_at <= now:
+                status = "expired"
+            elif remaining_days <= 7:
+                status = "expiring_soon"
+            else:
+                status = "active"
+
+        testers.append(
+            {
+                "email": row.get("email"),
+                "full_name": row.get("full_name"),
+                "real_plan": row.get("plan"),
+                "beta_plan": row.get("beta_plan"),
+                "beta_started_at": row.get("beta_started_at"),
+                "beta_expires_at": expires_raw,
+                "beta_granted_by": row.get("beta_granted_by"),
+                "status": status,
+                "remaining_days": remaining_days,
+            }
+        )
+
+    summary = {
+        "total": len(testers),
+        "active": sum(1 for t in testers if t["status"] == "active"),
+        "expiring_soon": sum(1 for t in testers if t["status"] == "expiring_soon"),
+        "expired": sum(1 for t in testers if t["status"] == "expired"),
+        "pro_beta": sum(1 for t in testers if t["beta_plan"] == "pro" and t["status"] != "expired"),
+        "family_beta": sum(1 for t in testers if t["beta_plan"] == "family" and t["status"] != "expired"),
+        "premium_beta": sum(1 for t in testers if t["beta_plan"] == "premium" and t["status"] != "expired"),
+    }
+    return {"summary": summary, "testers": testers}
 
 
 @router.get("/users/{email}/login-history")

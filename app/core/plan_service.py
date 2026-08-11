@@ -31,6 +31,7 @@ real for Pro/Family.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from .supabase import supabase
@@ -40,6 +41,12 @@ PlanId = Literal["free", "premium", "pro", "family"]
 VALID_PLANS: frozenset[str] = frozenset({"free", "premium", "pro", "family"})
 
 USER_TABLE = "vt_users"
+
+# Beta Tester Program (admin-controlled, time-limited Pro/Family/Premium
+# overlay) — a Beta grant can only ever be one of the three PAID tiers
+# (never "free", nothing to grant there).
+BETA_PLAN_VALUES: frozenset[str] = frozenset({"premium", "pro", "family"})
+_PLAN_RANK: dict[str, int] = {"free": 0, "premium": 1, "pro": 2, "family": 3}
 
 # ---------------------------------------------------------------------------
 # Feature hierarchy — explicit supersets, not a numeric "rank" comparison,
@@ -209,10 +216,187 @@ def get_plan_by_email(email: str) -> PlanId:
     return normalize_plan_row(rows[0])
 
 
+def _parse_iso(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
+
+
+def _fetch_beta_columns(email: str) -> dict[str, object]:
+    """Defensive read of the 4 `beta_*` columns (migration 034) — same
+    graceful-degradation rule as `get_plan_by_email`: if the migration has
+    not been run in Supabase yet, PostgREST rejects the whole select and
+    this returns `{}` (== no active grant) instead of raising, so the rest
+    of the app keeps working exactly as before the migration exists."""
+    normalized_email = email.strip().lower()
+    try:
+        response = (
+            supabase.table(USER_TABLE)
+            .select("beta_plan,beta_started_at,beta_expires_at,beta_granted_by")
+            .eq("email", normalized_email)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+    except Exception:
+        return {}
+    return dict(rows[0]) if rows else {}
+
+
+def get_beta_grant_by_email(email: str) -> dict[str, object] | None:
+    """Current Beta Tester Program grant state for `email`, or `None` if no
+    grant exists (never granted, or fully revoked). This is a pure READ —
+    it does not decide feature access by itself (see
+    `get_effective_plan_by_email`) — used by `/api/users/me` (customer
+    "Pro · Beta-Tester" label) and the admin user-detail endpoint (Beta
+    Tester panel: tier/start/expiry/remaining days)."""
+    row = _fetch_beta_columns(email)
+    beta_plan = row.get("beta_plan")
+    if not beta_plan:
+        return None
+
+    expires_at_raw = row.get("beta_expires_at")
+    expires_at = _parse_iso(expires_at_raw)
+    now = datetime.now(timezone.utc)
+    active = bool(expires_at and expires_at > now)
+    remaining_days = max(0, (expires_at - now).days) if (active and expires_at) else 0
+
+    return {
+        "plan": beta_plan,
+        "started_at": row.get("beta_started_at"),
+        "expires_at": expires_at_raw,
+        "granted_by": row.get("beta_granted_by"),
+        "active": active,
+        "remaining_days": remaining_days,
+    }
+
+
+def get_effective_plan_by_email(email: str) -> PlanId:
+    """The plan that ACTUALLY governs feature access right now: the higher
+    (by feature-hierarchy rank) of the user's real underlying `plan` and an
+    active, non-expired Beta grant — "valid paid subscription OR active
+    temporary Beta grant". Never returns a plan below the real underlying
+    plan (a Beta grant only ever ADDS access, never removes it) and never
+    persists/mutates anything — a pure read-time overlay. This is the ONE
+    function both `has_feature()` (real backend gating) and
+    `/api/users/me` (so existing client-side `profile.plan === 'pro'`
+    checks already sprinkled across the frontend work correctly for Beta
+    testers too, with zero extra per-page frontend changes) should use."""
+    real_plan = get_plan_by_email(email)
+    grant = get_beta_grant_by_email(email)
+    if grant and grant["active"]:
+        beta_plan = grant["plan"]
+        if _PLAN_RANK.get(str(beta_plan), 0) > _PLAN_RANK.get(real_plan, 0):
+            return beta_plan  # type: ignore[return-value]
+    return real_plan
+
+
+def grant_beta_by_email(email: str, plan: str, days: int, granted_by: str) -> bool:
+    """Admin-only action (authorization enforced by the calling router via
+    `manage_premium`, never here). Sets a brand-new temporary grant,
+    starting now — always REPLACES any previous grant for this user
+    (never stacks/extends implicitly; use `extend_beta_by_email` for that).
+    NEVER touches `vt_users.plan`/`premium` (the real paid/free plan) or
+    any Stripe data — purely the 4 `beta_*` overlay columns, so a real
+    paying Pro/Family subscriber's own plan is completely unaffected
+    either way, and no fake Stripe subscription is ever created."""
+    if plan not in BETA_PLAN_VALUES:
+        raise ValueError(f"Ung\u00fcltiger Beta-Tarif: {plan!r}")
+    if days <= 0:
+        raise ValueError("Beta-Zugang ben\u00f6tigt eine positive Anzahl Tage.")
+
+    normalized_email = email.strip().lower()
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=days)
+
+    try:
+        response = (
+            supabase.table(USER_TABLE)
+            .update(
+                {
+                    "beta_plan": plan,
+                    "beta_started_at": now.isoformat(),
+                    "beta_expires_at": expires_at.isoformat(),
+                    "beta_granted_by": granted_by.strip().lower(),
+                }
+            )
+            .eq("email", normalized_email)
+            .execute()
+        )
+    except Exception:
+        return False
+    return bool(response.data)
+
+
+def extend_beta_by_email(email: str, days: int, granted_by: str) -> dict[str, object] | None:
+    """Extends an EXISTING grant by `days`, counted from whichever is later
+    of "now" and the current expiry (extending an already-expired grant
+    never silently backdates it; extending a still-active one simply
+    pushes the end date further out). Returns `None` if the user has no
+    `beta_plan` set at all — callers should use `grant_beta_by_email`
+    instead in that case (there is nothing to extend)."""
+    if days <= 0:
+        raise ValueError("Verl\u00e4ngerung ben\u00f6tigt eine positive Anzahl Tage.")
+
+    normalized_email = email.strip().lower()
+    grant = get_beta_grant_by_email(normalized_email)
+    if not grant:
+        return None
+
+    now = datetime.now(timezone.utc)
+    current_expiry = _parse_iso(grant.get("expires_at")) or now
+    new_expiry = max(current_expiry, now) + timedelta(days=days)
+
+    try:
+        response = (
+            supabase.table(USER_TABLE)
+            .update({"beta_expires_at": new_expiry.isoformat(), "beta_granted_by": granted_by.strip().lower()})
+            .eq("email", normalized_email)
+            .execute()
+        )
+    except Exception:
+        return None
+    if not response.data:
+        return None
+    return {**grant, "expires_at": new_expiry.isoformat(), "active": True}
+
+
+def revoke_beta_by_email(email: str) -> dict[str, object] | None:
+    """Clears the current grant entirely (all 4 columns back to null).
+    Returns the grant state that WAS revoked (for the admin audit-log
+    entry), or `None` if there was nothing to revoke. Never touches
+    `vt_users.plan`/`premium`/Stripe data/any wellness data — the user
+    simply falls back to their real underlying plan on their very next
+    request, with nothing deleted."""
+    normalized_email = email.strip().lower()
+    previous = get_beta_grant_by_email(normalized_email)
+    if not previous:
+        return None
+
+    try:
+        supabase.table(USER_TABLE).update(
+            {"beta_plan": None, "beta_started_at": None, "beta_expires_at": None, "beta_granted_by": None}
+        ).eq("email", normalized_email).execute()
+    except Exception:
+        return None
+    return previous
+
+
 def has_feature(email: str, feature: str) -> bool:
     """The central entitlement check — routers should call this instead of
-    a raw `if premium` / `if plan == ...`."""
-    plan = get_plan_by_email(email)
+    a raw `if premium` / `if plan == ...`. Beta-aware: uses the EFFECTIVE
+    plan (real paid plan OR an active temporary Beta grant, whichever
+    ranks higher), never the real plan alone — this is what makes a Pro
+    Beta grant actually unlock real Pro features (family.py, health.py,
+    google_health.py, profile.py, daily_planning.py all call this)."""
+    plan = get_effective_plan_by_email(email)
     return feature in FEATURE_SETS[plan]
 
 

@@ -106,6 +106,58 @@ def _count_active_members(family_id: int) -> int:
         return 0
 
 
+def _get_family_owner_email(family_id: int) -> str | None:
+    """Resolves the owner's email via `vt_families.owner_user_id` (set
+    once at creation, never changed) — deliberately NOT via the owner's
+    membership row, since that stays authoritative even in the edge case
+    where the owner's own membership status is no longer 'active'."""
+    try:
+        family_rows = supabase.table(FAMILY_TABLE).select("owner_user_id").eq("id", family_id).limit(1).execute().data or []
+    except Exception:
+        return None
+    if not family_rows:
+        return None
+    owner_user_id = family_rows[0].get("owner_user_id")
+    if owner_user_id is None:
+        return None
+    try:
+        user_rows = supabase.table(USER_TABLE).select("email").eq("id", owner_user_id).limit(1).execute().data or []
+    except Exception:
+        return None
+    return str(user_rows[0]["email"]) if user_rows else None
+
+
+def _family_entitlement_active(family_id: int) -> bool:
+    """Non-destructive entitlement LOCK (Beta Tester Program hardening):
+    whether Family customer functionality (invite/accept/remove, Goals,
+    Challenges) is CURRENTLY unlocked for this EXISTING family — resolved
+    from the OWNER's effective plan (real paid Family tier OR an active
+    Family Beta grant, via `has_feature`'s existing effective-plan
+    resolution), never from the calling member's own personal plan
+    (members never need their own Family entitlement, by design — see
+    module docstring). Returns `False` (locked) if the owner can't be
+    resolved for any reason — fails closed, never raises. This function
+    NEVER deletes/mutates anything; it is a pure read used to gate access,
+    so a later re-grant/renewed subscription makes existing data usable
+    again immediately, with zero recreation."""
+    owner_email = _get_family_owner_email(family_id)
+    if not owner_email:
+        return False
+    return has_feature(owner_email, "family_profiles")
+
+
+def _require_family_entitlement_active(family_id: int) -> None:
+    if not _family_entitlement_active(family_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Der Family-Zugang ist aktuell nicht aktiv (z. B. abgelaufener oder widerrufener Beta-Zugang). "
+                "Eure Daten und Mitgliedschaften bleiben vollständig erhalten — sobald wieder ein gültiger "
+                "Family-Zugang besteht, ist alles wie gewohnt nutzbar."
+            ),
+        )
+
+
 def _resolve_identities(user_ids: list[int]) -> dict[int, dict[str, object]]:
     """Shared by the member roster and Family Goal participants — never
     duplicated. Returns ONLY identity fields (email/display_name), never
@@ -177,6 +229,7 @@ def _membership_response(email: str, user_id: int) -> dict[str, object]:
             "member_count_active": 0,
             "max_members": MAX_FAMILY_MEMBERS,
             "members": [],
+            "family_entitlement_active": True,
         }
 
     family_id = int(membership["family_id"])
@@ -189,6 +242,13 @@ def _membership_response(email: str, user_id: int) -> dict[str, object]:
         "member_count_active": _count_active_members(family_id),
         "max_members": MAX_FAMILY_MEMBERS,
         "members": _list_members(family_id),
+        # Beta Tester Program hardening: honest signal so the customer UI
+        # never "pretends" Family is active when the owner's entitlement
+        # (real paid plan OR Beta grant) has expired/been revoked — the
+        # membership/roster above is still returned in full (never hidden
+        # or deleted), only customer FEATURE USAGE (Goals/Challenges/
+        # invite/accept/remove) is locked elsewhere in this router.
+        "family_entitlement_active": _family_entitlement_active(family_id),
     }
 
 
@@ -288,6 +348,8 @@ async def invite_member(data: InviteRequest, authorization: str | None = Header(
             status_code=409, detail=f"Maximale Mitgliederzahl ({MAX_FAMILY_MEMBERS}) bereits erreicht."
         )
 
+    _require_family_entitlement_active(family_id)
+
     # A previously removed/left member already has a row for this exact
     # (family_id, user_id) pair — migration 029's `unique(family_id,
     # user_id)` constraint means re-inviting them must UPDATE that row
@@ -339,6 +401,7 @@ async def accept_invitation(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=404, detail="Keine offene Einladung gefunden.")
 
     family_id = int(membership["family_id"])
+    _require_family_entitlement_active(family_id)
     if _count_active_members(family_id) >= MAX_FAMILY_MEMBERS:
         raise HTTPException(
             status_code=409, detail=f"Die Family hat bereits die maximale Mitgliederzahl ({MAX_FAMILY_MEMBERS}) erreicht."
@@ -397,6 +460,7 @@ async def remove_member(user_id: int, authorization: str | None = Header(default
         raise HTTPException(status_code=400, detail="Der Owner kann sich nicht selbst entfernen.")
 
     family_id = int(owner_membership["family_id"])
+    _require_family_entitlement_active(family_id)
     try:
         target_rows = (
             supabase.table(MEMBER_TABLE)
@@ -464,12 +528,16 @@ class FamilyGoalProgress(BaseModel):
 
 
 def _require_active_membership(user_id: int) -> dict[str, object]:
-    """Family Goals require the caller to be a currently ACTIVE member
-    (not merely invited) — a removed/left member loses access entirely,
-    same as the membership roster itself."""
+    """Family Goals/Challenges require the caller to be a currently ACTIVE
+    member (not merely invited) — a removed/left member loses access
+    entirely, same as the membership roster itself. Also enforces the
+    Beta Tester Program's non-destructive entitlement lock: shared by
+    EVERY Goals/Challenges endpoint (list/create/update/archive/join/
+    progress), so a single check here gates all of them uniformly."""
     membership = _get_open_membership(user_id)
     if not membership or membership.get("status") != "active":
         raise HTTPException(status_code=403, detail="Du bist aktuell kein aktives Family-Mitglied.")
+    _require_family_entitlement_active(int(membership["family_id"]))
     return membership
 
 
