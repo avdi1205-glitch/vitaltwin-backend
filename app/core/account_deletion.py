@@ -60,6 +60,12 @@ NUTRITION_TABLE = "vt_nutrition_entries"
 #   them at the database level. Listing them again here would be redundant
 #   (and they're keyed by `user_id`, not `email`, so they don't fit this
 #   email-scoped loop anyway).
+# - Family Foundation tables (`vt_families`, `vt_family_members`): same
+#   reasoning — both have `user_id`/`owner_user_id bigint references
+#   vt_users(id) ON DELETE CASCADE` (migration 029), so a deleted user's
+#   own family (if they were the owner) and their membership row in any
+#   family are removed automatically. Deleting an owner does NOT delete
+#   other members' own VitalTwin accounts/data — only the roster rows.
 _DIRECT_EMAIL_TABLES: tuple[str, ...] = (
     DAILY_PLAN_ACTION_TABLE,
     HABIT_ENTRY_TABLE,

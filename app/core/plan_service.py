@@ -76,11 +76,17 @@ _PRO_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
 # Family is >= Pro for general wellness features (no real family-sharing
 # backend exists yet, see PLAN_ARCHITECTURE_REPORT.md, but a Family
 # subscriber should never have FEWER individual-wellness features than Pro).
+# "family_profiles" (pricing page: "Bis zu 6 eigenständige Profile") is the
+# first genuinely enforced Family-EXCLUSIVE feature — see
+# routers/family.py::create_family. It deliberately grants ONLY the right
+# to create/own a Family membership group, NOT shared wellness-data
+# visibility (still not built, see routers/family.py module docstring).
 _FAMILY_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
     "multiple_goals",
     "lifestyle_simulation",
     "extended_reports",
     "advanced_digital_twin",
+    "family_profiles",
 })
 
 # Free/Premium keep today's pre-existing behavior of exactly one
@@ -88,6 +94,10 @@ _FAMILY_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
 # "Individuelle Tagesziele", singular) — Pro/Family get `multiple_goals`
 # (unlimited). Never retroactively touches goals a user already created.
 FREE_TIER_MAX_ACTIVE_GOALS = 1
+
+# "Bis zu 6 eigenständige Profile" (pricing page) — the owner counts as one
+# of the 6 (auto-added as an 'active' member with role='owner' on create).
+MAX_FAMILY_MEMBERS = 6
 
 FEATURE_SETS: dict[PlanId, frozenset[str]] = {
     "free": _FREE_FEATURES,
