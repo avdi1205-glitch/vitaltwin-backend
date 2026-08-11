@@ -47,6 +47,7 @@ from ..core.validation import MAX_MEMORY_REASON, MAX_SHORT_TEXT, validate_short_
 from ..services import pattern_detection, twin_memory
 from ..services.daily_signal_view import build_daily_signals
 from ..services.habit_service import compute_habit_stats
+from ..services.twin_learning_timeline import DEFAULT_LIMIT, MAX_LIMIT, build_learning_timeline
 
 router = APIRouter()
 
@@ -60,6 +61,7 @@ RECOMMENDATION_TABLE = "vt_recommendations"
 HEALTH_ACTIVITY_TABLE = "health_activity_records"
 CGM_TABLE = "vt_cgm_readings"
 NUTRITION_TABLE = "vt_nutrition_entries"
+LEARNING_EVENT_TABLE = "vt_twin_learning_events"
 CROSS_DOMAIN_LOOKBACK_DAYS = 30
 """Twin Core Phase 3 — matches `pattern_detection.LOOKBACK_DAYS`, so the
 daily signal view covers exactly the window the correlation detectors
@@ -793,3 +795,79 @@ async def discard_pattern(pattern_id: str, data: MemoryActionInput, authorizatio
         reason=data.reason,
     )
     return {"message": "Muster verworfen."}
+
+
+@router.get("/learning-timeline")
+async def get_learning_timeline(
+    authorization: str | None = Header(default=None),
+    limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
+):
+    """Twin Core Phase 5 — "Was dein Twin über dich gelernt hat". Reads the
+    already-persisted `vt_twin_learning_events` table (written from
+    `routers/twin_memory.py`/`profile.py`/`recommendations.py`, see
+    `services/twin_learning_timeline.py` module docstring for the full
+    inventory) and composes a small, deterministic, customer-safe timeline —
+    never a raw event dump. Strictly scoped to the requesting user's own
+    email; Family membership grants no access to another member's timeline
+    (no Family table is touched anywhere in this path)."""
+    email = _require_email(authorization)
+    query_limit = DEFAULT_LIMIT if limit <= 0 else min(limit, MAX_LIMIT)
+    query_offset = max(offset, 0)
+
+    try:
+        response = (
+            supabase.table(LEARNING_EVENT_TABLE)
+            .select("id,event_type,source_type,source_id,previous_state,new_state,reason,created_at")
+            .eq("email", email)
+            .order("created_at", desc=True)
+            .range(query_offset, query_offset + query_limit - 1)
+            .execute()
+        )
+        rows = response.data or []
+    except Exception:
+        rows = []
+
+    memory_ids = [str(row["source_id"]) for row in rows if row.get("source_type") == "twin_memory" and row.get("source_id")]
+    pattern_ids = [str(row["source_id"]) for row in rows if row.get("source_type") == "twin_pattern" and row.get("source_id")]
+    goal_ids = [str(row["source_id"]) for row in rows if row.get("source_type") == "wellness_goal" and row.get("source_id")]
+
+    def _current_rows_by_id(table: str, ids: list[str]) -> dict[str, dict[str, object]]:
+        if not ids:
+            return {}
+        try:
+            current = supabase.table(table).select("id,status").eq("email", email).in_("id", ids).execute().data or []
+        except Exception:
+            current = []
+        return {str(item["id"]): item for item in current}
+
+    current_memories, current_patterns, current_goals = run_parallel(
+        lambda: _current_rows_by_id(MEMORY_TABLE, memory_ids),
+        lambda: _current_rows_by_id(PATTERN_TABLE, pattern_ids),
+        lambda: _current_rows_by_id(GOAL_TABLE, goal_ids),
+    )
+
+    timeline = build_learning_timeline(
+        rows,
+        source_ids_by_domain={"memory": current_memories, "pattern": current_patterns, "goal": current_goals},
+    )
+    return {
+        "items": [
+            {
+                "id": entry.id,
+                "occurred_at": entry.occurred_at,
+                "category": entry.category,
+                "related_domain": entry.related_domain,
+                "title": entry.title,
+                "summary": entry.summary,
+                "confidence_before": entry.confidence_before,
+                "confidence_after": entry.confidence_after,
+                "current_status": entry.current_status,
+                "is_current": entry.is_current,
+            }
+            for entry in timeline
+        ],
+        "limit": query_limit,
+        "offset": query_offset,
+        "has_more": len(rows) == query_limit,
+    }
