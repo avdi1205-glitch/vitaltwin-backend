@@ -124,13 +124,23 @@ async def sync_user_health_data(
                     # Root-cause diagnostic: structural keys only (no values,
                     # no tokens/identifiers) — reveals why normalization
                     # rejected this raw point, without logging health data.
+                    # Root-cause diagnostic: structural keys only (no values,
+                    # no tokens/identifiers) — reveals why normalization
+                    # rejected this raw point, without logging health data.
+                    nested_shape: dict[str, object] = {}
+                    for k, v in item.items():
+                        if isinstance(v, dict):
+                            nested_shape[k] = {
+                                inner_k: type(inner_v).__name__ for inner_k, inner_v in v.items()
+                            }
+                            for inner_k, inner_v in v.items():
+                                if isinstance(inner_v, (int, float)):
+                                    nested_shape[k][f"{inner_k}_gt_1000"] = inner_v > 1000
                     skip_debug.append(
                         {
                             "reason": "normalize_returned_none",
                             "keys": sorted(item.keys()),
-                            "nested_keys": {
-                                k: sorted(v.keys()) for k, v in item.items() if isinstance(v, dict)
-                            },
+                            "nested_shape": nested_shape,
                         }
                     )
                     continue
