@@ -179,6 +179,65 @@ class TestRecommendationsAndFeedbackBlocks:
         assert "bewegung" not in context.text
 
 
+class TestGoogleHealthBlock:
+    def test_signal_with_data_is_included_with_source_label(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "google_health": {
+                "steps": {
+                    "average": 9000,
+                    "data_points": 5,
+                    "data_quality": "calculated",
+                    "latest_value": 9500,
+                    "latest_observed_at": "2026-08-10T08:00:00+00:00",
+                    "unit": "Schritte",
+                    "has_data": True,
+                    "source": "google_health",
+                }
+            },
+        }
+        context = build_twin_context(**kwargs)
+        assert "Schritte" in context.text
+        assert "Google Health" in context.text
+        assert any(s.type == "google_health" for s in context.sources)
+
+    def test_signal_without_data_is_skipped_never_reported_as_zero(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "google_health": {
+                "steps": {"average": None, "data_points": 0, "data_quality": "missing", "latest_value": None,
+                           "latest_observed_at": None, "unit": "Schritte", "has_data": False, "source": "none"}
+            },
+        }
+        context = build_twin_context(**kwargs)
+        assert "Schritte" not in context.text
+
+    def test_manual_fallback_source_is_stated_explicitly(self):
+        kwargs = {
+            **EMPTY_KWARGS,
+            "google_health": {
+                "steps": {
+                    "average": 4000,
+                    "data_points": 2,
+                    "data_quality": "partial",
+                    "latest_value": None,
+                    "latest_observed_at": None,
+                    "unit": "Schritte",
+                    "has_data": True,
+                    "source": "manual_checkin",
+                }
+            },
+        }
+        context = build_twin_context(**kwargs)
+        assert "manuellem Check-in" in context.text
+
+    def test_missing_google_health_param_defaults_to_empty(self):
+        # Backward compatibility: existing callers that don't pass
+        # `google_health` at all must keep working unchanged.
+        context = build_twin_context(**EMPTY_KWARGS)
+        assert "Google Health" not in context.text
+
+
 class TestDailyPlanBlock:
     def test_plan_actions_are_included(self):
         kwargs = {**EMPTY_KWARGS, "daily_plan_actions": [{"description": "10 Minuten spazieren gehen"}]}

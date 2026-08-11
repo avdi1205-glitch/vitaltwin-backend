@@ -48,13 +48,27 @@ TREND_LABELS = {
     "mood": "Stimmung",
 }
 
+# Twin Core Phase 1 (Google Health -> Twin Intelligence). Values arrive as
+# plain dicts shaped by `services/google_health_signals.py::signal_to_context_dict`
+# — this module never imports that module's dataclasses, keeping the
+# context builder provider-agnostic (a future non-Google provider writing
+# the same plain-dict shape needs zero changes here).
+GOOGLE_HEALTH_LABELS = {
+    "steps": "Schritte",
+    "sleep_duration": "Schlafdauer (automatisch erfasst)",
+    "active_minutes": "Aktive Minuten",
+    "distance": "Distanz",
+    "heart_rate": "Herzfrequenz",
+    "weight": "Gewicht",
+}
+
 
 @dataclass(frozen=True)
 class ContextSource:
     """One traceable "Datengrundlage" item — surfaced to the frontend so a
     reply can be marked transparently (Etappe 7 §6), never left unlabeled."""
 
-    type: str  # "user_reported" | "trend" | "confirmed_memory" | "pattern" | "general_wellness_info"
+    type: str  # "user_reported" | "trend" | "google_health" | "confirmed_memory" | "pattern" | "general_wellness_info"
     label: str
 
 
@@ -108,6 +122,37 @@ def _trends_block(trends: dict[str, dict[str, object]]) -> tuple[str, ContextSou
     if not notes:
         return None
     return f"Letzte Trends: {'; '.join(notes)}.", ContextSource(type="trend", label="Deine berechneten Trends")
+
+
+def _google_health_block(google_health: dict[str, dict[str, object]]) -> tuple[str, ContextSource] | None:
+    """Only real, stored Google Health data is ever mentioned — a signal
+    with `has_data=False` (or missing entirely) is silently skipped, never
+    reported as zero (Constitution rule 6: never let missing data read as
+    "nothing happened"). Each note carries its own data-quality label and,
+    when the signal fell back to manual check-in data (Step 5 source
+    precedence), says so explicitly rather than implying it's automatic."""
+    notes = []
+    for signal, label in GOOGLE_HEALTH_LABELS.items():
+        data = google_health.get(signal)
+        if not data or not data.get("has_data"):
+            continue
+        unit = str(data.get("unit") or "").strip()
+        if data.get("average") is not None:
+            value_note = f"Ø {data['average']} {unit}".strip()
+        elif data.get("latest_value") is not None:
+            value_note = f"zuletzt {data['latest_value']} {unit}".strip()
+        else:
+            continue
+        quality = data.get("data_quality")
+        source = data.get("source")
+        source_note = " — aus manuellem Check-in, da keine aktuellen Google-Health-Daten vorliegen" if source == "manual_checkin" else ""
+        notes.append(f"{label}: {value_note} ({quality}){source_note}")
+    if not notes:
+        return None
+    return (
+        f"Automatische Gesundheitsdaten (Google Health): {'; '.join(notes)}.",
+        ContextSource(type="google_health", label="Deine automatisch synchronisierten Google-Health-Daten"),
+    )
 
 
 def _memories_block(memories: list[dict[str, object]]) -> tuple[str, ContextSource] | None:
@@ -188,15 +233,19 @@ def build_twin_context(
     confirmed_patterns: list[dict[str, object]],
     daily_plan_actions: list[dict[str, object]],
     max_chars: int,
+    google_health: dict[str, dict[str, object]] | None = None,
 ) -> TwinContext:
     quality_note = _data_quality_note(daily_entry_count)
 
-    # Priority order per Etappe 7 §1's own listing.
+    # Priority order per Etappe 7 §1's own listing, with the new Google
+    # Health block placed right after trends (same conceptual tier —
+    # computed, quantitative history) and before memories/recommendations.
     blocks = [
         _profile_block(profile),
         _goals_block(goals),
         _habits_block(habits),
         _trends_block(trends),
+        _google_health_block(google_health or {}),
         _memories_block(confirmed_memories),
         _recommendations_block(active_recommendations),
         _feedback_block(feedback_summary),

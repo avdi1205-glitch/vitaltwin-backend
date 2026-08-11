@@ -55,6 +55,7 @@ DEFAULT_MODEL = "gpt-4o-mini"
 ALLOWED_SOURCE_TYPES = {
     "user_reported",
     "trend",
+    "google_health",
     "confirmed_memory",
     "pattern",
     "general_wellness_info",

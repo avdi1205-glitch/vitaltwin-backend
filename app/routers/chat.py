@@ -28,18 +28,20 @@ Request flow for `POST /ask`, in order:
 from __future__ import annotations
 
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from ..core.auth import require_email as _require_email_dependency
+from ..core.auth import get_user_id_by_email
 from ..core.ai_usage_logger import log_ai_usage
 from ..core.concurrency import run_parallel
 from ..core.plans import get_chat_daily_limit, get_context_char_limit
 from ..core.rate_limit import enforce_rate_limit
 from ..core.supabase import supabase
 from ..services import personalization
+from ..services import google_health_signals as ghs
 from ..services.ai_provider import (
     MAX_INPUT_LENGTH,
     AIProvider,
@@ -74,12 +76,21 @@ PATTERN_TABLE = "vt_twin_patterns"
 RECOMMENDATION_TABLE = "vt_recommendations"
 DAILY_PLAN_TABLE = "vt_daily_plans"
 DAILY_PLAN_ACTION_TABLE = "vt_daily_plan_actions"
+HEALTH_ACTIVITY_TABLE = "health_activity_records"
+HEALTH_SLEEP_TABLE = "health_sleep_records"
+HEALTH_METRIC_TABLE = "health_metric_records"
 
 MIN_SECONDS_BETWEEN_REQUESTS = 3
 IP_RATE_LIMIT_MAX_REQUESTS = 20
 IP_RATE_LIMIT_WINDOW_SECONDS = 60
 
 TREND_FIELDS = ("sleep_hours", "energy", "movement_minutes", "stress", "mood")
+
+# Twin Core Phase 1: how far back to load raw Google Health rows — must
+# cover both the 7-day recent window and the (non-overlapping) 28-day
+# baseline window ending 7 days ago, i.e. 35 days total.
+GOOGLE_HEALTH_LOOKBACK_DAYS = ghs.RECENT_WINDOW_DAYS + ghs.BASELINE_WINDOW_DAYS
+
 
 
 class ChatRequest(BaseModel):
@@ -314,6 +325,12 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         except Exception:
             return None
 
+    def _user_id() -> int | None:
+        # Twin Core Phase 1: Google Health tables are keyed by `user_id`,
+        # not `email` — reuses the EXISTING core/auth.py resolver, no
+        # second identity system.
+        return get_user_id_by_email(email)
+
     (
         profile,
         goals,
@@ -325,6 +342,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         recommendation_history,
         confirmed_patterns,
         today_plan_id,
+        user_id,
     ) = run_parallel(
         _profile,
         _goals,
@@ -336,6 +354,7 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         _recommendation_history,
         _confirmed_patterns,
         _today_plan_id,
+        _user_id,
     )
 
     habits = _combine_habits_with_stats(habits_raw, habit_entries, today)
@@ -346,6 +365,8 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         trends[field_name] = {"average": result.average, "data_quality": result.data_quality}
 
     feedback_summary = personalization.compute_category_penalty(recommendation_history)
+
+    google_health_context = _build_google_health_context(user_id, daily_entries, today)
 
     daily_plan_actions: list[dict[str, object]] = []
     if today_plan_id:
@@ -373,9 +394,64 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
         confirmed_patterns=confirmed_patterns,
         daily_plan_actions=daily_plan_actions,
         max_chars=get_context_char_limit(plan),
+        google_health=google_health_context,
     )
     sources = [{"type": s.type, "label": s.label} for s in context.sources]
     return context.text, sources, context.truncated, profile
+
+
+def _load_google_health_rows(user_id: int, table: str, *, data_type: str | None, since_iso: str) -> list[dict[str, object]]:
+    # Google Health tables are `user_id`-keyed (never `email`) — an
+    # explicit `.eq("user_id", user_id)` here is the ONLY thing standing
+    # between one user's automatically-synced health data and another's
+    # Twin context (Step 8: strict user isolation).
+    try:
+        query = supabase.table(table).select("*").eq("user_id", user_id)
+        if data_type:
+            query = query.eq("data_type", data_type)
+        time_field = "observed_at" if table == HEALTH_METRIC_TABLE else "start_time"
+        return query.gte(time_field, since_iso).execute().data or []
+    except Exception:
+        return []
+
+
+def _build_google_health_context(
+    user_id: int | None, daily_entries: list[dict[str, object]], today: date
+) -> dict[str, dict[str, object]]:
+    """Twin Core Phase 1: reads VitalTwin's OWN already-persisted Google
+    Health records (never the Google API — provider independence,
+    Constitution rule 8) and shapes them into the plain-dict form
+    `twin_context.py` consumes. Returns `{}` (never raises, never invents
+    data) if `user_id` couldn't be resolved or nothing is stored."""
+    if user_id is None:
+        return {}
+
+    since_iso = (today - timedelta(days=GOOGLE_HEALTH_LOOKBACK_DAYS)).isoformat()
+
+    def _rows(signal: str) -> list[dict[str, object]]:
+        config = ghs.SIGNAL_CONFIG[signal]
+        return _load_google_health_rows(
+            user_id, str(config["table"]), data_type=config.get("data_type"), since_iso=since_iso
+        )
+
+    signal_names = list(ghs.SIGNAL_CONFIG.keys())
+    rows_by_signal = dict(zip(signal_names, run_parallel(*[lambda s=name: _rows(s) for name in signal_names])))
+
+    result: dict[str, dict[str, object]] = {}
+    for signal in signal_names:
+        rows = rows_by_signal[signal]
+        if signal in ghs.MANUAL_FIELD_FOR_SIGNAL:
+            # Step 5: source precedence — real Google Health data wins when
+            # present, manual check-in data is the fallback; neither
+            # history is ever modified.
+            resolved = ghs.resolve_trend_source(
+                signal=signal, google_rows=rows, manual_entries=daily_entries, today=today
+            )
+            result[signal] = ghs.signal_to_context_dict(resolved, unit=str(ghs.SIGNAL_CONFIG[signal]["unit"]))
+        else:
+            built = ghs.build_signal(rows, signal=signal, today=today)
+            result[signal] = ghs.signal_to_context_dict(built)
+    return result
 
 
 @router.get("/status")
