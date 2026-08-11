@@ -124,7 +124,15 @@ async def sync_user_health_data(
                     # Root-cause diagnostic: structural keys only (no values,
                     # no tokens/identifiers) — reveals why normalization
                     # rejected this raw point, without logging health data.
-                    skip_debug.append({"reason": "normalize_returned_none", "keys": sorted(item.keys())})
+                    skip_debug.append(
+                        {
+                            "reason": "normalize_returned_none",
+                            "keys": sorted(item.keys()),
+                            "nested_keys": {
+                                k: sorted(v.keys()) for k, v in item.items() if isinstance(v, dict)
+                            },
+                        }
+                    )
                     continue
                 normalized["user_id"] = user_id
                 normalized["connection_id"] = connection_id
