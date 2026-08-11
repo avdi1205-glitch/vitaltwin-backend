@@ -25,6 +25,41 @@ MAX_PAGES_PER_SYNC = 50  # safety limit so a pagination bug can never loop forev
 DEFAULT_PAGE_SIZE = 200  # Google Health API max is 10,000 points/page; keep requests small/fast
 
 
+def _to_civil_time(iso_value: str) -> str:
+    """Strips any UTC offset/`Z` suffix, e.g. "2026-08-10T00:00:00+00:00" ->
+    "2026-08-10T00:00:00" — matches the naive "civil time" format Google's
+    docs use for interval-shaped data types (e.g. `steps.interval.civil_start_time`)."""
+    return iso_value.replace("+00:00", "").rstrip("Z")
+
+
+def _to_physical_time(iso_value: str) -> str:
+    """Normalizes to an absolute "Z"-suffixed timestamp, matching the
+    "physical time" format Google's docs use for sample-shaped data types
+    (e.g. `body_fat.sample_time.physical_time`)."""
+    if iso_value.endswith("Z"):
+        return iso_value
+    return iso_value.replace("+00:00", "Z")
+
+
+def _filter_field_names(data_type: str) -> tuple[str, str]:
+    """Returns the (start, end) filter field paths for `data_type`, per
+    Google's documented filter syntax. Interval-shaped types (category
+    "activity"/"sleep") filter on `<data_type>.interval.civil_{start,end}_time`;
+    sample-shaped types (category "metric") filter on
+    `<data_type>.sample_time.physical_time` (same field for both bounds).
+    The data type name must be snake_case in the filter (kebab-case in the
+    URL path only), e.g. `heart-rate` -> `heart_rate`."""
+    from .health_normalization_service import DATA_TYPE_CONFIG
+
+    snake_name = data_type.replace("-", "_")
+    config = DATA_TYPE_CONFIG.get(data_type)
+    category = config.category if config else "activity"
+    if category == "metric":
+        field = f"{snake_name}.sample_time.physical_time"
+        return field, field
+    return f"{snake_name}.interval.civil_start_time", f"{snake_name}.interval.civil_end_time"
+
+
 class GoogleHealthClient:
     def __init__(self, *, access_token: str, transport: httpx.BaseTransport | None = None, timeout: float = 20.0):
         self._access_token = access_token
@@ -75,10 +110,12 @@ class GoogleHealthClient:
         if page_token:
             params["page_token"] = page_token
         filters = []
-        if start_time:
-            filters.append(f"start_time>={start_time}")
-        if end_time:
-            filters.append(f"end_time<={end_time}")
+        if start_time or end_time:
+            start_field, end_field = _filter_field_names(data_type)
+            if start_time:
+                filters.append(f'{start_field} >= "{_to_civil_time(start_time) if start_field.endswith("civil_start_time") else _to_physical_time(start_time)}"')
+            if end_time:
+                filters.append(f'{end_field} <= "{_to_civil_time(end_time) if end_field.endswith("civil_end_time") else _to_physical_time(end_time)}"')
         if filters:
             params["filter"] = " AND ".join(filters)
         return await self._get(f"/users/me/dataTypes/{data_type}/dataPoints", params=params)

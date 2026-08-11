@@ -327,6 +327,41 @@ class TestGoogleHealthClient:
         assert exc_info.value.code == "HEALTH_PROVIDER_UNAVAILABLE"
 
     @pytest.mark.anyio
+    async def test_steps_filter_uses_quoted_civil_time_field_path(self):
+        """Root-cause regression test: Google returned 400 Bad Request for
+        every data type because the old filter was `start_time>=<value>`
+        (unqualified field name, unquoted value) instead of the documented
+        `steps.interval.civil_start_time >= "<value>"` syntax."""
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["filter"] = request.url.params.get("filter")
+            return httpx.Response(200, json={"dataPoints": []})
+
+        client = GoogleHealthClient(access_token="at", transport=httpx.MockTransport(handler))
+        await client.list_data_points_page(
+            data_type="steps", start_time="2026-08-10T00:00:00+00:00", end_time="2026-08-11T00:00:00+00:00"
+        )
+        assert captured["filter"] == 'steps.interval.civil_start_time >= "2026-08-10T00:00:00" AND steps.interval.civil_end_time <= "2026-08-11T00:00:00"'
+
+    @pytest.mark.anyio
+    async def test_metric_filter_uses_quoted_physical_time_field_path(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["filter"] = request.url.params.get("filter")
+            return httpx.Response(200, json={"dataPoints": []})
+
+        client = GoogleHealthClient(access_token="at", transport=httpx.MockTransport(handler))
+        await client.list_data_points_page(
+            data_type="heart-rate", start_time="2026-08-10T00:00:00+00:00", end_time="2026-08-11T00:00:00+00:00"
+        )
+        assert (
+            captured["filter"]
+            == 'heart_rate.sample_time.physical_time >= "2026-08-10T00:00:00Z" AND heart_rate.sample_time.physical_time <= "2026-08-11T00:00:00Z"'
+        )
+
+    @pytest.mark.anyio
     async def test_iter_data_points_paginates(self):
         pages = [
             {"dataPoints": [{"name": "dp1"}], "nextPageToken": "page2"},
