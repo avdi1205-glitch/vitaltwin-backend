@@ -85,6 +85,11 @@ _PRO_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
 # create_family_goal) — joining/viewing/updating own progress only
 # requires being an active member of the family itself (any personal
 # plan), never a second personal-plan check.
+# "family_challenges" gates only CREATING a Family Challenge
+# (routers/family.py::create_family_challenge) — same pattern as
+# family_goals: joining/viewing/updating own progress only requires being
+# an active member of the family itself, never a second personal-plan
+# check.
 _FAMILY_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
     "multiple_goals",
     "lifestyle_simulation",
@@ -92,6 +97,7 @@ _FAMILY_FEATURES: frozenset[str] = _PREMIUM_FEATURES | frozenset({
     "advanced_digital_twin",
     "family_profiles",
     "family_goals",
+    "family_challenges",
 })
 
 # Free/Premium keep today's pre-existing behavior of exactly one

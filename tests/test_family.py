@@ -97,9 +97,9 @@ class _Query:
             new_row.setdefault("id", self._table.next_id())
             if self._table.name == family_module.MEMBER_TABLE:
                 new_row.setdefault("status", "invited")
-            elif self._table.name == family_module.GOAL_TABLE:
+            elif self._table.name in (family_module.GOAL_TABLE, family_module.CHALLENGE_TABLE):
                 new_row.setdefault("status", "active")
-            elif self._table.name == family_module.GOAL_MEMBER_TABLE:
+            elif self._table.name in (family_module.GOAL_MEMBER_TABLE, family_module.CHALLENGE_MEMBER_TABLE):
                 new_row.setdefault("progress_value", 0)
                 new_row.setdefault("completed", False)
             new_row.setdefault("created_at", new_row["id"])
@@ -123,6 +123,8 @@ class _FakeSupabase:
             family_module.PROFILE_TABLE: _Table(family_module.PROFILE_TABLE),
             family_module.GOAL_TABLE: _Table(family_module.GOAL_TABLE),
             family_module.GOAL_MEMBER_TABLE: _Table(family_module.GOAL_MEMBER_TABLE),
+            family_module.CHALLENGE_TABLE: _Table(family_module.CHALLENGE_TABLE),
+            family_module.CHALLENGE_MEMBER_TABLE: _Table(family_module.CHALLENGE_MEMBER_TABLE),
         }
 
     def seed_user(self, user_id: int, email: str, display_name: str | None = None):
@@ -572,4 +574,218 @@ class TestFamilyGoalsPrivacy:
         for participant in result["participants"]:
             assert set(participant.keys()) == {"user_id", "email", "display_name", "progress_value", "completed"}
         assert set(result["created_by"].keys()) == {"email", "display_name"}
+
+
+class TestFamilyChallengesCreateAndEntitlement:
+    @pytest.mark.anyio
+    async def test_owner_can_create_family_challenge(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        result = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="7 Tage gemeinsam spazieren"), authorization="Bearer x"
+        )
+        assert result["title"] == "7 Tage gemeinsam spazieren"
+        assert result["status"] == "active"
+        assert result["target_type"] == "completion_count"
+        assert result["participants"] == []
+
+    @pytest.mark.anyio
+    async def test_member_cannot_create_family_challenge(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.create_family_challenge(
+                family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+            )
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_non_family_tier_cannot_create_family_challenge(self, fake_family_env, monkeypatch):
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(1, "owner@example.com"))
+        monkeypatch.setattr(family_module, "has_feature", lambda email, feature: True)
+        await family_module.create_family(authorization="Bearer x")
+
+        monkeypatch.setattr(family_module, "has_feature", lambda email, feature: False)
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.create_family_challenge(
+                family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+            )
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_family_tier_owner_allowed(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        result = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+        assert result["id"] is not None
+
+    @pytest.mark.anyio
+    async def test_negative_target_value_rejected(self, fake_family_env, monkeypatch):
+        with pytest.raises(ValueError):
+            family_module.FamilyChallengeCreate(title="Challenge", target_value=-5)
+
+
+class TestFamilyChallengesListingAndIsolation:
+    @pytest.mark.anyio
+    async def test_family_members_can_list_challenges(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        result = await family_module.list_family_challenges(authorization="Bearer x")
+        assert len(result["challenges"]) == 1
+        assert result["challenges"][0]["title"] == "Challenge"
+
+    @pytest.mark.anyio
+    async def test_family_isolation_for_challenges(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Familie A Challenge"), authorization="Bearer x"
+        )
+
+        fake_family_env.seed_user(10, "owner-b@example.com")
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(10, "owner-b@example.com"))
+        await family_module.create_family(authorization="Bearer x")
+
+        result_b = await family_module.list_family_challenges(authorization="Bearer x")
+        assert result_b["challenges"] == []
+
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.update_family_challenge(
+                challenge["id"], family_module.FamilyChallengeUpdate(title="Übernommen"), authorization="Bearer x"
+            )
+        assert exc_info.value.status_code == 404
+
+
+class TestFamilyChallengesParticipationAndProgress:
+    @pytest.mark.anyio
+    async def test_member_can_join_challenge(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        result = await family_module.join_family_challenge(challenge["id"], authorization="Bearer x")
+        assert result["participant_count"] == 1
+        assert result["participants"][0]["user_id"] == 2
+
+    @pytest.mark.anyio
+    async def test_duplicate_join_does_not_create_second_row(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        await family_module.join_family_challenge(challenge["id"], authorization="Bearer x")
+        result = await family_module.join_family_challenge(challenge["id"], authorization="Bearer x")
+        assert result["participant_count"] == 1
+
+    @pytest.mark.anyio
+    async def test_member_can_update_own_progress(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        await family_module.join_family_challenge(challenge["id"], authorization="Bearer x")
+
+        result = await family_module.update_family_challenge_progress(
+            challenge["id"],
+            family_module.FamilyChallengeProgress(progress_value=4, completed=False),
+            authorization="Bearer x",
+        )
+        participant = next(p for p in result["participants"] if p["user_id"] == 2)
+        assert participant["progress_value"] == 4
+
+    @pytest.mark.anyio
+    async def test_negative_progress_value_clamped_to_zero(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        await family_module.join_family_challenge(challenge["id"], authorization="Bearer x")
+
+        result = await family_module.update_family_challenge_progress(
+            challenge["id"], family_module.FamilyChallengeProgress(progress_value=-3), authorization="Bearer x"
+        )
+        participant = next(p for p in result["participants"] if p["user_id"] == 2)
+        assert participant["progress_value"] == 0
+
+    @pytest.mark.anyio
+    async def test_member_cannot_update_another_members_progress(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+        # Owner joins too, then member2 (who never joined) tries to update progress.
+        await family_module.join_family_challenge(challenge["id"], authorization="Bearer x")
+
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.update_family_challenge_progress(
+                challenge["id"], family_module.FamilyChallengeProgress(completed=True), authorization="Bearer x"
+            )
+        # member2 never joined, so they have no own row to update -> 404 (never touches user 1's row).
+        assert exc_info.value.status_code == 404
+        challenge_members = fake_family_env.tables[family_module.CHALLENGE_MEMBER_TABLE].rows
+        owner_row = next(r for r in challenge_members if r["user_id"] == 1)
+        assert owner_row["completed"] is False
+
+
+class TestFamilyChallengesOwnerManagement:
+    @pytest.mark.anyio
+    async def test_owner_can_edit_challenge(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Alt"), authorization="Bearer x"
+        )
+        result = await family_module.update_family_challenge(
+            challenge["id"], family_module.FamilyChallengeUpdate(title="Neu"), authorization="Bearer x"
+        )
+        assert result["title"] == "Neu"
+
+    @pytest.mark.anyio
+    async def test_owner_can_archive_challenge(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+        result = await family_module.archive_family_challenge(challenge["id"], authorization="Bearer x")
+        assert result["archived"] is True
+
+        listing = await family_module.list_family_challenges(authorization="Bearer x")
+        assert listing["challenges"] == []
+
+    @pytest.mark.anyio
+    async def test_removed_family_member_loses_challenge_access(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+        await family_module.remove_member(2, authorization="Bearer x")
+
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        with pytest.raises(HTTPException) as exc_info:
+            await family_module.list_family_challenges(authorization="Bearer x")
+        assert exc_info.value.status_code == 403
+
+
+class TestFamilyChallengesPrivacy:
+    @pytest.mark.anyio
+    async def test_no_private_wellness_fields_exposed(self, fake_family_env, monkeypatch):
+        await _setup_family_with_member(monkeypatch, fake_family_env)
+        challenge = await family_module.create_family_challenge(
+            family_module.FamilyChallengeCreate(title="Challenge"), authorization="Bearer x"
+        )
+        monkeypatch.setattr(family_module, "require_user", lambda auth: _user(2, "member2@example.com"))
+        result = await family_module.join_family_challenge(challenge["id"], authorization="Bearer x")
+
+        for participant in result["participants"]:
+            assert set(participant.keys()) == {"user_id", "email", "display_name", "progress_value", "completed"}
+        assert set(result["created_by"].keys()) == {"email", "display_name"}
+
 

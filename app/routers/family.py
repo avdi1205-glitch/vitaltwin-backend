@@ -1,23 +1,28 @@
 """Family Foundation (membership) + Family Goals V1 (shared coordination
-goals, Family tier).
+goals, Family tier) + Family Challenges V1 (time-boxed shared motivation
+activities, Family tier).
 
 Constitution-critical scope limit (see task spec): membership is purely an
 identity/roster relationship — it does NOT grant any member (owner
 included) automatic access to another member's private wellness data
 (check-ins, CGM/nutrition, Google Health, Twin chat, PERSONAL goals,
-habits, reports, simulations). Family Goals are a SEPARATE, deliberately
-narrow system: shared coordination goals (e.g. "3 Spaziergänge diese
-Woche") where a member explicitly submits their own participation/
-progress for that shared goal — never a window into anyone's private
-wellness data. `vt_wellness_goals` (personal goals) is untouched and
-never read here. Shared challenges, family overview/dashboard, and any
-automatic health-data sharing are explicitly OUT OF SCOPE and must not be
-added here without a separate, deliberate task.
+habits, reports, simulations). Family Goals and Family Challenges are
+SEPARATE, deliberately narrow systems: shared coordination goals/
+challenges (e.g. "3 Spaziergänge diese Woche", "7 Tage gemeinsam
+spazieren") where a member explicitly submits their own participation/
+progress — never a window into anyone's private wellness data. Kept as
+two distinct tables (not merged) since their target-type vocabularies and
+future evolution differ, even though today's shape is similar.
+`vt_wellness_goals` (personal goals) is untouched and never read here.
+Family overview/dashboard reuses this data (see family-overview-section.tsx
+on the frontend) but any automatic health-data sharing, leaderboards,
+badges, or points economy are explicitly OUT OF SCOPE.
 
 Reuses `core/auth.py::require_user`/`get_user_id_by_email` (no parallel
 identity resolution), `core/plan_service.py::has_feature` (`family_profiles`/
-`family_goals` features — Family tier only), and the same best-effort SMTP
-pattern already used by `routers/contact.py` (no new email service).
+`family_goals`/`family_challenges` features — Family tier only), and the
+same best-effort SMTP pattern already used by `routers/contact.py` (no new
+email service).
 """
 
 from __future__ import annotations
@@ -44,6 +49,8 @@ USER_TABLE = "vt_users"
 PROFILE_TABLE = "vt_user_profiles"
 GOAL_TABLE = "vt_family_goals"
 GOAL_MEMBER_TABLE = "vt_family_goal_members"
+CHALLENGE_TABLE = "vt_family_challenges"
+CHALLENGE_MEMBER_TABLE = "vt_family_challenge_members"
 
 OPEN_STATUSES = ("active", "invited")
 
@@ -715,4 +722,335 @@ async def update_family_goal_progress(
             raise HTTPException(status_code=500, detail="Fortschritt konnte nicht gespeichert werden.") from exc
 
     return _serialize_goal(goal)
+
+
+# ---------------------------------------------------------------------------
+# Family Challenges V1 — time-boxed shared motivation activities, NOT
+# private wellness data. Deliberately a separate table from Family Goals
+# (see module docstring) even though the shape is similar today.
+# ---------------------------------------------------------------------------
+
+ChallengeTargetType = Literal["completion_count", "days_completed"]
+
+
+class FamilyChallengeCreate(BaseModel):
+    title: str
+    description: str | None = None
+    target_type: ChallengeTargetType = "completion_count"
+    target_value: float | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Bitte gib einen Titel für die Familien-Challenge ein.")
+        return stripped
+
+    @field_validator("target_value")
+    @classmethod
+    def _validate_target_value(cls, value: float | None) -> float | None:
+        if value is not None and value < 0:
+            raise ValueError("Das Ziel darf nicht negativ sein.")
+        return value
+
+
+class FamilyChallengeUpdate(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    target_type: ChallengeTargetType | None = None
+    target_value: float | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    status: Literal["active", "archived"] | None = None
+
+    @field_validator("target_value")
+    @classmethod
+    def _validate_target_value(cls, value: float | None) -> float | None:
+        if value is not None and value < 0:
+            raise ValueError("Das Ziel darf nicht negativ sein.")
+        return value
+
+
+class FamilyChallengeProgress(BaseModel):
+    progress_value: float | None = None
+    completed: bool | None = None
+
+    @field_validator("progress_value")
+    @classmethod
+    def _clamp_progress_value(cls, value: float | None) -> float | None:
+        # Deterministic, no error dialog for a likely typo/negative delta —
+        # matches this table's own DB check (progress_value >= 0).
+        if value is not None and value < 0:
+            return 0.0
+        return value
+
+
+def _get_family_challenge(challenge_id: int, family_id: int) -> dict[str, object] | None:
+    """Scoped by family_id so Family A can never reach Family B's
+    challenge by id — a 404 (not 403) so a guessed id can't be
+    distinguished from one that doesn't exist."""
+    try:
+        rows = (
+            supabase.table(CHALLENGE_TABLE)
+            .select("*")
+            .eq("id", challenge_id)
+            .eq("family_id", family_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _list_challenge_participants(challenge_id: int) -> list[dict[str, object]]:
+    """ONLY identity + explicitly-submitted progress for THIS challenge —
+    never any private wellness data (Constitution privacy rule)."""
+    try:
+        rows = (
+            supabase.table(CHALLENGE_MEMBER_TABLE)
+            .select("*")
+            .eq("family_challenge_id", challenge_id)
+            .order("joined_at")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return []
+
+    identities = _resolve_identities([row["user_id"] for row in rows])
+    return [
+        {
+            "user_id": int(row["user_id"]),
+            "email": identities.get(int(row["user_id"]), {"email": ""}).get("email"),
+            "display_name": identities.get(int(row["user_id"]), {"display_name": None}).get("display_name"),
+            "progress_value": row.get("progress_value"),
+            "completed": row.get("completed"),
+        }
+        for row in rows
+    ]
+
+
+def _serialize_challenge(challenge: dict[str, object]) -> dict[str, object]:
+    participants = _list_challenge_participants(int(challenge["id"]))
+    creator = _resolve_identities([int(challenge["created_by_user_id"])]).get(
+        int(challenge["created_by_user_id"]), {"email": "", "display_name": None}
+    )
+    return {
+        "id": int(challenge["id"]),
+        "title": challenge.get("title"),
+        "description": challenge.get("description"),
+        "target_type": challenge.get("target_type"),
+        "target_value": challenge.get("target_value"),
+        "start_date": challenge.get("start_date"),
+        "end_date": challenge.get("end_date"),
+        "status": challenge.get("status"),
+        "created_by": creator,
+        "participants": participants,
+        "participant_count": len(participants),
+        "completed_count": sum(1 for p in participants if p.get("completed")),
+    }
+
+
+@router.get("/challenges")
+async def list_family_challenges(authorization: str | None = Header(default=None)):
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+    family_id = int(membership["family_id"])
+
+    try:
+        rows = (
+            supabase.table(CHALLENGE_TABLE)
+            .select("*")
+            .eq("family_id", family_id)
+            .eq("status", "active")
+            .order("created_at", desc=True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
+
+    return {"challenges": [_serialize_challenge(row) for row in rows]}
+
+
+@router.post("/challenges")
+async def create_family_challenge(data: FamilyChallengeCreate, authorization: str | None = Header(default=None)):
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    if not has_feature(current.email, "family_challenges"):
+        raise HTTPException(
+            status_code=403, detail="Familien-Challenges sind ein Family-Tarif-Feature. Upgrade auf Family."
+        )
+    membership = _require_active_membership(current.user_id)
+    if membership.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Nur der Family-Owner kann Familien-Challenges erstellen.")
+
+    payload = {
+        "family_id": int(membership["family_id"]),
+        "created_by_user_id": current.user_id,
+        "title": data.title,
+        "description": data.description,
+        "target_type": data.target_type,
+        "target_value": data.target_value,
+        "start_date": data.start_date.isoformat() if data.start_date else None,
+        "end_date": data.end_date.isoformat() if data.end_date else None,
+    }
+    try:
+        response = supabase.table(CHALLENGE_TABLE).insert(payload).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Familien-Challenge konnte nicht gespeichert werden.") from exc
+    challenge_row = response.data[0] if response.data else None
+    if not challenge_row:
+        raise HTTPException(status_code=500, detail="Familien-Challenge konnte nicht gespeichert werden.")
+
+    return _serialize_challenge(challenge_row)
+
+
+@router.patch("/challenges/{challenge_id}")
+async def update_family_challenge(
+    challenge_id: int, data: FamilyChallengeUpdate, authorization: str | None = Header(default=None)
+):
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+    if membership.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Nur der Family-Owner kann Familien-Challenges bearbeiten.")
+
+    challenge = _get_family_challenge(challenge_id, int(membership["family_id"]))
+    if not challenge:
+        raise HTTPException(status_code=404, detail="Familien-Challenge nicht gefunden.")
+
+    payload = data.model_dump(exclude_none=True)
+    if "start_date" in payload and payload["start_date"] is not None:
+        payload["start_date"] = data.start_date.isoformat()
+    if "end_date" in payload and payload["end_date"] is not None:
+        payload["end_date"] = data.end_date.isoformat()
+    if payload:
+        payload["updated_at"] = _now_iso()
+        try:
+            supabase.table(CHALLENGE_TABLE).update(payload).eq("id", challenge_id).execute()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Familien-Challenge konnte nicht aktualisiert werden.") from exc
+
+    updated = _get_family_challenge(challenge_id, int(membership["family_id"])) or challenge
+    return _serialize_challenge(updated)
+
+
+@router.delete("/challenges/{challenge_id}")
+async def archive_family_challenge(challenge_id: int, authorization: str | None = Header(default=None)):
+    """Soft delete (archives), same convention as Family Goals."""
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+    if membership.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="Nur der Family-Owner kann Familien-Challenges archivieren.")
+
+    challenge = _get_family_challenge(challenge_id, int(membership["family_id"]))
+    if not challenge:
+        raise HTTPException(status_code=404, detail="Familien-Challenge nicht gefunden.")
+
+    try:
+        supabase.table(CHALLENGE_TABLE).update({"status": "archived", "updated_at": _now_iso()}).eq(
+            "id", challenge_id
+        ).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Familien-Challenge konnte nicht archiviert werden.") from exc
+
+    return {"archived": True}
+
+
+@router.post("/challenges/{challenge_id}/join")
+async def join_family_challenge(challenge_id: int, authorization: str | None = Header(default=None)):
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+
+    challenge = _get_family_challenge(challenge_id, int(membership["family_id"]))
+    if not challenge or challenge.get("status") != "active":
+        raise HTTPException(status_code=404, detail="Familien-Challenge nicht gefunden.")
+
+    try:
+        existing = (
+            supabase.table(CHALLENGE_MEMBER_TABLE)
+            .select("id")
+            .eq("family_challenge_id", challenge_id)
+            .eq("user_id", current.user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        existing = []
+    if existing:
+        return _serialize_challenge(challenge)
+
+    try:
+        supabase.table(CHALLENGE_MEMBER_TABLE).insert({
+            "family_challenge_id": challenge_id,
+            "user_id": current.user_id,
+        }).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Teilnahme konnte nicht gespeichert werden.") from exc
+
+    return _serialize_challenge(challenge)
+
+
+@router.patch("/challenges/{challenge_id}/progress")
+async def update_family_challenge_progress(
+    challenge_id: int, data: FamilyChallengeProgress, authorization: str | None = Header(default=None)
+):
+    """A member may only ever update their OWN participation row — never
+    another member's (enforced by filtering the update on `user_id`, not
+    just `family_challenge_id`)."""
+    current = require_user(authorization)
+    if current.user_id is None:
+        raise HTTPException(status_code=401, detail="Konto konnte nicht aufgelöst werden.")
+    membership = _require_active_membership(current.user_id)
+
+    challenge = _get_family_challenge(challenge_id, int(membership["family_id"]))
+    if not challenge:
+        raise HTTPException(status_code=404, detail="Familien-Challenge nicht gefunden.")
+
+    try:
+        own_rows = (
+            supabase.table(CHALLENGE_MEMBER_TABLE)
+            .select("id")
+            .eq("family_challenge_id", challenge_id)
+            .eq("user_id", current.user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        own_rows = []
+    if not own_rows:
+        raise HTTPException(status_code=404, detail="Du nimmst an dieser Familien-Challenge noch nicht teil.")
+
+    payload = data.model_dump(exclude_none=True)
+    if payload:
+        payload["updated_at"] = _now_iso()
+        try:
+            supabase.table(CHALLENGE_MEMBER_TABLE).update(payload).eq("id", own_rows[0]["id"]).execute()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Fortschritt konnte nicht gespeichert werden.") from exc
+
+    return _serialize_challenge(challenge)
+
+
 
