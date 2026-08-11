@@ -107,6 +107,7 @@ async def sync_user_health_data(
         raise
 
     client = GoogleHealthClient(access_token=access_token)
+    debug_last_error: str | None = None
 
     for data_type in data_types:
         if not has_required_scope(data_type, granted_scopes):
@@ -130,8 +131,9 @@ async def sync_user_health_data(
                     ).execute()
                     counters["created"] += 1
                     synced += 1
-                except Exception:
+                except Exception as upsert_exc:
                     counters["skipped"] += 1
+                    debug_last_error = f"{data_type}: {upsert_exc}"[:300]
             per_type_results[data_type] = {"synced": synced, "error_code": None}
             any_success = True
         except HealthIntegrationError as exc:
@@ -169,7 +171,13 @@ async def sync_user_health_data(
         error_message=None if status == "completed" else "Ein oder mehrere Datentypen konnten nicht synchronisiert werden.",
     )
 
-    return {"sync_run_id": run_id, "status": status, "counters": counters, "per_type": per_type_results}
+    return {
+        "sync_run_id": run_id,
+        "status": status,
+        "counters": counters,
+        "per_type": per_type_results,
+        "debug_last_error": debug_last_error,
+    }
 
 
 def _category_of(data_type: str) -> str:
