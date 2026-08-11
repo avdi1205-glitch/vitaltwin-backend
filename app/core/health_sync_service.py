@@ -130,12 +130,15 @@ async def sync_user_health_data(
                     nested_shape: dict[str, object] = {}
                     for k, v in item.items():
                         if isinstance(v, dict):
-                            nested_shape[k] = {
-                                inner_k: type(inner_v).__name__ for inner_k, inner_v in v.items()
-                            }
+                            shape: dict[str, object] = {}
                             for inner_k, inner_v in v.items():
-                                if isinstance(inner_v, (int, float)):
-                                    nested_shape[k][f"{inner_k}_gt_1000"] = inner_v > 1000
+                                if isinstance(inner_v, dict):
+                                    shape[inner_k] = {"__keys__": sorted(inner_v.keys())}
+                                else:
+                                    shape[inner_k] = type(inner_v).__name__
+                                    if isinstance(inner_v, (int, float)):
+                                        shape[f"{inner_k}_gt_1000"] = inner_v > 1000
+                            nested_shape[k] = shape
                     skip_debug.append(
                         {
                             "reason": "normalize_returned_none",
