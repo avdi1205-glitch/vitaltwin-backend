@@ -156,6 +156,30 @@ class TestPatternsBlock:
         context = build_twin_context(**kwargs)
         assert "Verworfen" not in context.text
 
+    def test_cross_domain_pattern_flows_through_unchanged_existing_mechanism(self):
+        """Twin Core Phase 3: cross-domain patterns share the SAME
+        `vt_twin_patterns` row shape (status/contradicting/summary) as
+        every existing same-table pattern — no twin_context.py change was
+        needed to surface them."""
+        kwargs = {
+            **EMPTY_KWARGS,
+            "confirmed_patterns": [
+                {
+                    "status": "active",
+                    "contradicting": False,
+                    "summary": (
+                        "In deinen bisherigen Daten zeigt sich möglicherweise ein Zusammenhang zwischen "
+                        "Aktivität (Schritte) und durchschnittlicher Glukosewert am Folgetag: ..."
+                    ),
+                    "pattern_type": "aktivitaet_glukose_gleicher_tag",
+                    "evidence": {"alignment": "same_day", "sources": ["google_health", "cgm"], "data_points": 6},
+                }
+            ],
+        }
+        context = build_twin_context(**kwargs)
+        assert "möglicherweise" in context.text
+        assert any(s.type == "pattern" for s in context.sources)
+
 
 class TestRecommendationsAndFeedbackBlocks:
     def test_proposed_recommendation_is_included(self):

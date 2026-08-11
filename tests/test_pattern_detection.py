@@ -147,3 +147,123 @@ class TestGeneratePatterns:
         assert "schlafdauer_energie" in pattern_types
         assert "wochentag_routine" in pattern_types
         assert "empfehlungstyp_erfolgsquote" in pattern_types
+
+    def test_daily_signals_none_runs_no_cross_domain_detectors(self):
+        # Backward compatibility: existing callers that don't pass
+        # `daily_signals` at all must keep working unchanged.
+        patterns = pattern_detection.generate_patterns(
+            daily_entries=[], habit_entries=[], recommendation_history=[], today=TODAY, daily_signals=None
+        )
+        assert patterns == []
+
+    def test_daily_signals_provided_runs_cross_domain_detectors(self):
+        daily_signals = {
+            (TODAY - timedelta(days=idx)): {"google_steps": steps, "glucose_mean": glucose}
+            for idx, (steps, glucose) in enumerate(
+                zip([3000, 4000, 5000, 6000, 7000, 8000], [90, 95, 100, 105, 110, 115])
+            )
+        }
+        patterns = pattern_detection.generate_patterns(
+            daily_entries=[], habit_entries=[], recommendation_history=[], today=TODAY, daily_signals=daily_signals
+        )
+        pattern_types = {p.pattern_type for p in patterns}
+        assert "aktivitaet_glukose_gleicher_tag" in pattern_types
+
+
+class TestCrossDomainPatterns:
+    """Twin Core Phase 3 — a LIMITED, explicitly-documented allowlist, each
+    reusing the SAME `_detect_correlation_pattern`/`_pearson` as the
+    same-table detectors above (no new statistical method)."""
+
+    def _daily_signals(self, **series: list[float]) -> dict[date, dict[str, float]]:
+        length = len(next(iter(series.values())))
+        return {
+            (TODAY - timedelta(days=idx)): {key: values[idx] for key, values in series.items()}
+            for idx in range(length)
+        }
+
+    def test_activity_glucose_same_day_pattern_detected(self):
+        daily_signals = self._daily_signals(
+            google_steps=[3000, 4000, 5000, 6000, 7000, 8000], glucose_mean=[90, 95, 100, 105, 110, 115]
+        )
+        pattern = pattern_detection.detect_activity_glucose_same_day_pattern(daily_signals, today=TODAY)
+        assert pattern is not None
+        assert pattern.pattern_type == "aktivitaet_glukose_gleicher_tag"
+        assert pattern.evidence["alignment"] == "same_day"
+        assert pattern.evidence["sources"] == ["google_health", "cgm"]
+        assert "verursacht" not in pattern.summary.lower()
+
+    def test_activity_glucose_insufficient_overlapping_days_yields_none(self):
+        # Only 3 days have BOTH signals — below MIN_PATTERN_DATA_POINTS=5.
+        daily_signals = self._daily_signals(google_steps=[3000, 4000, 5000], glucose_mean=[90, 95, 100])
+        assert pattern_detection.detect_activity_glucose_same_day_pattern(daily_signals, today=TODAY) is None
+
+    def test_activity_glucose_constant_glucose_yields_none(self):
+        # Non-constant-data rejection is inherited from `_pearson` (zero
+        # variance -> None) — no new code needed for this gate.
+        daily_signals = self._daily_signals(
+            google_steps=[3000, 4000, 5000, 6000, 7000, 8000], glucose_mean=[100, 100, 100, 100, 100, 100]
+        )
+        assert pattern_detection.detect_activity_glucose_same_day_pattern(daily_signals, today=TODAY) is None
+
+    def test_sleep_next_day_energy_pattern_uses_next_day_alignment_wording(self):
+        # sleep on day N pairs with energy on day N+1: build a daily_signals
+        # dict where sleep_hours(day) correlates with energy(day+1).
+        days = [TODAY - timedelta(days=idx) for idx in range(7, -1, -1)]
+        sleep_values = [5, 6, 7, 8, 9, 5, 6, 7]
+        energy_values_next_day = [3, 4, 5, 6, 7, 3, 4]  # energy on day[i+1] correlates with sleep on day[i]
+        daily_signals: dict[date, dict[str, float]] = {}
+        for idx, day in enumerate(days):
+            daily_signals.setdefault(day, {})["sleep_hours"] = sleep_values[idx]
+        for idx, energy in enumerate(energy_values_next_day):
+            daily_signals.setdefault(days[idx] + timedelta(days=1), {})["energy"] = energy
+
+        pattern = pattern_detection.detect_sleep_next_day_energy_pattern(daily_signals, today=TODAY)
+        assert pattern is not None
+        assert pattern.evidence["alignment"] == "next_day"
+        assert "Folgetag" in pattern.summary or "darauffolgenden Tag" in pattern.summary
+
+    def test_sleep_next_day_glucose_pattern_detected(self):
+        days = [TODAY - timedelta(days=idx) for idx in range(7, -1, -1)]
+        sleep_values = [5, 6, 7, 8, 9, 5, 6, 7]
+        glucose_next_day = [130, 125, 120, 115, 110, 130, 125]
+        daily_signals: dict[date, dict[str, float]] = {}
+        for idx, day in enumerate(days):
+            daily_signals.setdefault(day, {})["sleep_hours"] = sleep_values[idx]
+        for idx, glucose in enumerate(glucose_next_day):
+            daily_signals.setdefault(days[idx] + timedelta(days=1), {})["glucose_mean"] = glucose
+
+        pattern = pattern_detection.detect_sleep_next_day_glucose_pattern(daily_signals, today=TODAY)
+        assert pattern is not None
+        assert pattern.evidence["alignment"] == "next_day"
+        assert pattern.evidence["sources"] == ["checkin", "cgm"]
+
+    def test_nutrition_carbs_glucose_same_day_pattern_detected(self):
+        daily_signals = self._daily_signals(
+            nutrition_carbs=[20, 40, 60, 80, 100, 120], glucose_mean=[90, 100, 110, 120, 130, 140]
+        )
+        pattern = pattern_detection.detect_nutrition_carbs_glucose_same_day_pattern(daily_signals, today=TODAY)
+        assert pattern is not None
+        assert pattern.evidence["alignment"] == "same_day"
+        assert pattern.evidence["sources"] == ["nutrition", "cgm"]
+
+    def test_sparse_nutrition_logging_insufficient_overlap_yields_none(self):
+        daily_signals = self._daily_signals(nutrition_carbs=[40, 60], glucose_mean=[100, 110])
+        assert pattern_detection.detect_nutrition_carbs_glucose_same_day_pattern(daily_signals, today=TODAY) is None
+
+    def test_no_causality_language_in_any_cross_domain_summary(self):
+        daily_signals = self._daily_signals(
+            google_steps=[3000, 4000, 5000, 6000, 7000, 8000],
+            glucose_mean=[90, 95, 100, 105, 110, 115],
+            nutrition_carbs=[20, 40, 60, 80, 100, 120],
+        )
+        for detector in (
+            pattern_detection.detect_activity_glucose_same_day_pattern,
+            pattern_detection.detect_nutrition_carbs_glucose_same_day_pattern,
+        ):
+            pattern = detector(daily_signals, today=TODAY)
+            assert pattern is not None
+            assert "verursacht" not in pattern.summary.lower()
+            assert "diagnos" not in pattern.summary.lower()
+            assert "möglicherweise" in pattern.summary
+

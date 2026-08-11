@@ -1,6 +1,13 @@
 """Transparent, rule-based pattern detection.
 
-Twin Intelligence Core — Etappe 5 §3.
+Twin Intelligence Core — Etappe 5 §3. Extended in Twin Core Phase 3
+(Cross-Domain Intelligence) with a LIMITED, explicitly-documented allowlist
+of cross-source pairs — see `detect_activity_glucose_same_day_pattern`
+onward. No new statistical method, no ML: every cross-domain detector
+reuses the SAME `_detect_correlation_pattern`/`_pearson` this file already
+used for same-table check-in patterns, just fed a differently-shaped input
+(`services/daily_signal_view.py`'s day-aligned rows instead of raw
+`vt_daily_wellness_entries` rows).
 
 Pure functions over already-fetched data — no database access, no ML, no
 hidden "AI magic". Every detector computes a simple Pearson correlation (or,
@@ -17,6 +24,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+
+from .daily_signal_view import to_next_day_shifted_rows, to_same_day_rows
 
 MIN_PATTERN_DATA_POINTS = 5
 LOOKBACK_DAYS = 30
@@ -98,7 +107,16 @@ def _detect_correlation_pattern(
     label_a: str,
     label_b: str,
     today: date,
+    alignment: str = "same_day",
+    sources: tuple[str, ...] = (),
 ) -> PatternDraft | None:
+    """`alignment`/`sources` are Twin Core Phase 3 additions (cross-domain
+    patterns) — both default to values that reproduce the EXACT prior
+    behavior/wording for the 3 existing same-table detectors below, which
+    never pass them. `alignment="next_day"` only changes the summary
+    sentence to state the time-shift explicitly (Step 4: never imply a
+    same-day relationship that is actually next-day) and is recorded in
+    `evidence` for explainability (Step 10)."""
     dates, xs, ys = _paired_series(entries, field_a, field_b, today=today, days=LOOKBACK_DAYS)
     if len(xs) < MIN_PATTERN_DATA_POINTS:
         return None
@@ -128,15 +146,27 @@ def _detect_correlation_pattern(
 
     direction = "positiv" if r > 0 else "negativ"
     connector = "tendenziell höher" if r > 0 else "tendenziell niedriger"
-    summary = (
-        f"In deinen bisherigen Daten zeigt sich möglicherweise ein Zusammenhang zwischen "
-        f"{label_a} und {label_b}: an Tagen mit mehr {label_a} ist {label_b} {connector}. "
-        f"Das ist eine mögliche Verbindung in deinen eigenen Daten, keine Ursache."
-    )
+    if alignment == "next_day":
+        summary = (
+            f"In deinen bisherigen Daten zeigt sich möglicherweise ein Zusammenhang zwischen "
+            f"{label_a} und {label_b} am Folgetag: an Tagen mit mehr {label_a} war {label_b} am "
+            f"darauffolgenden Tag {connector}. "
+            f"Das ist eine mögliche Verbindung in deinen eigenen Daten, keine Ursache."
+        )
+    else:
+        summary = (
+            f"In deinen bisherigen Daten zeigt sich möglicherweise ein Zusammenhang zwischen "
+            f"{label_a} und {label_b}: an Tagen mit mehr {label_a} ist {label_b} {connector}. "
+            f"Das ist eine mögliche Verbindung in deinen eigenen Daten, keine Ursache."
+        )
     if contradicting:
         summary += " Die Daten sind dabei nicht eindeutig — in einem Teil des Zeitraums zeigte sich das Gegenteil."
 
     confidence = min(0.85, abs(r)) * (0.6 if contradicting else 1.0)
+
+    evidence: dict[str, object] = {"correlation": round(r, 2), "data_points": len(xs), "alignment": alignment}
+    if sources:
+        evidence["sources"] = list(sources)
 
     return PatternDraft(
         pattern_type=pattern_type,
@@ -149,8 +179,9 @@ def _detect_correlation_pattern(
         confidence=round(confidence, 2),
         data_quality="calculated" if len(xs) >= MIN_PATTERN_DATA_POINTS + 2 else "partial",
         contradicting=contradicting,
-        evidence={"correlation": round(r, 2), "data_points": len(xs)},
+        evidence=evidence,
     )
+
 
 
 def detect_sleep_energy_pattern(entries: list[dict[str, object]], *, today: date) -> PatternDraft | None:
@@ -300,16 +331,107 @@ def detect_recommendation_success_pattern(
     )
 
 
+# ---------------------------------------------------------------------------
+# Cross-domain patterns (Twin Core Phase 3) — a LIMITED, explicitly-chosen
+# allowlist derived directly from the task's own example pairs, not an
+# exhaustive "correlate everything" sweep. Each documents its own time
+# alignment (same-day vs. next-day, Step 4) and contributing sources
+# (Step 9/10 provenance). Every detector is a thin wrapper around the SAME
+# `_detect_correlation_pattern` used above — zero new statistical method.
+# ---------------------------------------------------------------------------
+
+
+def detect_activity_glucose_same_day_pattern(
+    daily_signals: dict[date, dict[str, float]], *, today: date
+) -> PatternDraft | None:
+    """SAME-DAY: Google Health steps vs. CGM daily-mean glucose."""
+    rows = to_same_day_rows(daily_signals)
+    return _detect_correlation_pattern(
+        rows,
+        pattern_type="aktivitaet_glukose_gleicher_tag",
+        field_a="google_steps",
+        field_b="glucose_mean",
+        label_a="Aktivität (Schritte)",
+        label_b="durchschnittlicher Glukosewert",
+        today=today,
+        alignment="same_day",
+        sources=("google_health", "cgm"),
+    )
+
+
+def detect_sleep_next_day_energy_pattern(
+    daily_signals: dict[date, dict[str, float]], *, today: date
+) -> PatternDraft | None:
+    """NEXT-DAY: check-in sleep duration (night of day N) vs. check-in
+    energy (day N+1)."""
+    rows = to_next_day_shifted_rows(daily_signals, day_field="sleep_hours", next_day_field="energy")
+    return _detect_correlation_pattern(
+        rows,
+        pattern_type="schlaf_naechster_tag_energie",
+        field_a="sleep_hours",
+        field_b="energy",
+        label_a="Schlafdauer",
+        label_b="Energie",
+        today=today,
+        alignment="next_day",
+        sources=("checkin",),
+    )
+
+
+def detect_sleep_next_day_glucose_pattern(
+    daily_signals: dict[date, dict[str, float]], *, today: date
+) -> PatternDraft | None:
+    """NEXT-DAY: check-in sleep duration (night of day N) vs. CGM
+    daily-mean glucose (day N+1)."""
+    rows = to_next_day_shifted_rows(daily_signals, day_field="sleep_hours", next_day_field="glucose_mean")
+    return _detect_correlation_pattern(
+        rows,
+        pattern_type="schlaf_naechster_tag_glukose",
+        field_a="sleep_hours",
+        field_b="glucose_mean",
+        label_a="Schlafdauer",
+        label_b="durchschnittlicher Glukosewert",
+        today=today,
+        alignment="next_day",
+        sources=("checkin", "cgm"),
+    )
+
+
+def detect_nutrition_carbs_glucose_same_day_pattern(
+    daily_signals: dict[date, dict[str, float]], *, today: date
+) -> PatternDraft | None:
+    """SAME-DAY: logged nutrition carbohydrates vs. CGM daily-mean glucose.
+    Only ever pairs a day where BOTH a real nutrition entry AND a real CGM
+    reading exist — sparse/incomplete logging on either side simply
+    produces fewer overlapping days, never a fabricated pairing."""
+    rows = to_same_day_rows(daily_signals)
+    return _detect_correlation_pattern(
+        rows,
+        pattern_type="ernaehrung_kohlenhydrate_glukose_gleicher_tag",
+        field_a="nutrition_carbs",
+        field_b="glucose_mean",
+        label_a="erfasste Kohlenhydrate",
+        label_b="durchschnittlicher Glukosewert",
+        today=today,
+        alignment="same_day",
+        sources=("nutrition", "cgm"),
+    )
+
+
 def generate_patterns(
     *,
     daily_entries: list[dict[str, object]],
     habit_entries: list[dict[str, object]],
     recommendation_history: list[dict[str, object]],
     today: date,
+    daily_signals: dict[date, dict[str, float]] | None = None,
 ) -> list[PatternDraft]:
     """Runs every detector and collects all resulting drafts. Callers
     (`routers/twin_memory.py`) de-duplicate against existing patterns
-    (`pattern_key`) before persisting anything."""
+    (`pattern_key`) before persisting anything. `daily_signals` (Twin Core
+    Phase 3, optional, defaults to `None`→no cross-domain detectors run —
+    100% backward compatible for any existing caller that doesn't build
+    one) is the day-aligned view from `services/daily_signal_view.py`."""
     drafts: list[PatternDraft] = []
     for detector in (detect_sleep_energy_pattern, detect_movement_mood_pattern, detect_stress_sleep_quality_pattern):
         draft = detector(daily_entries, today=today)
@@ -323,5 +445,16 @@ def generate_patterns(
     recommendation_draft = detect_recommendation_success_pattern(recommendation_history)
     if recommendation_draft is not None:
         drafts.append(recommendation_draft)
+
+    if daily_signals:
+        for detector in (
+            detect_activity_glucose_same_day_pattern,
+            detect_sleep_next_day_energy_pattern,
+            detect_sleep_next_day_glucose_pattern,
+            detect_nutrition_carbs_glucose_same_day_pattern,
+        ):
+            draft = detector(daily_signals, today=today)
+            if draft is not None:
+                drafts.append(draft)
 
     return drafts

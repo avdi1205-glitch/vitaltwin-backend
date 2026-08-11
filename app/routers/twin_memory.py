@@ -33,17 +33,19 @@ manipulated/guessed id can never return another user's memory or pattern
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from ..core.auth import require_email as _require_email_dependency
+from ..core.auth import get_user_id_by_email
 from ..core.concurrency import run_parallel
 from ..core.learning_events import record_learning_event
 from ..core.supabase import supabase
 from ..core.validation import MAX_MEMORY_REASON, MAX_SHORT_TEXT, validate_short_text
 from ..services import pattern_detection, twin_memory
+from ..services.daily_signal_view import build_daily_signals
 from ..services.habit_service import compute_habit_stats
 
 router = APIRouter()
@@ -55,6 +57,13 @@ HABIT_TABLE = "vt_habits"
 HABIT_ENTRY_TABLE = "vt_habit_entries"
 GOAL_TABLE = "vt_wellness_goals"
 RECOMMENDATION_TABLE = "vt_recommendations"
+HEALTH_ACTIVITY_TABLE = "health_activity_records"
+CGM_TABLE = "vt_cgm_readings"
+NUTRITION_TABLE = "vt_nutrition_entries"
+CROSS_DOMAIN_LOOKBACK_DAYS = 30
+"""Twin Core Phase 3 — matches `pattern_detection.LOOKBACK_DAYS`, so the
+daily signal view covers exactly the window the correlation detectors
+actually look at."""
 
 MANUAL_MEMORY_TYPES = {"persoenliche_regel", "bevorzugte_kommunikationsform"}
 """Die einzigen zwei Memory-Typen, die ein Nutzer direkt und ausdrücklich
@@ -617,9 +626,84 @@ async def list_patterns(authorization: str | None = Header(default=None)):
         except Exception:
             return []
 
-    daily_entries, habit_entries, recommendation_history, existing_patterns = run_parallel(
-        _daily_entries, _habit_entries, _recommendation_history, _existing_patterns
+    def _user_id() -> int | None:
+        # Twin Core Phase 3: Google Health tables are keyed by `user_id`,
+        # not `email` — reuses the EXISTING core/auth.py resolver, no
+        # second identity system (Step 11: mixed email/user_id sources
+        # must still resolve to the SAME authenticated user only).
+        return get_user_id_by_email(email)
+
+    def _cgm_rows() -> list[dict[str, object]]:
+        since_iso = (today - timedelta(days=CROSS_DOMAIN_LOOKBACK_DAYS)).isoformat()
+        try:
+            return (
+                supabase.table(CGM_TABLE)
+                .select("glucose_value,reading_at")
+                .eq("email", email)
+                .gte("reading_at", since_iso)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    def _nutrition_rows() -> list[dict[str, object]]:
+        since_iso = (today - timedelta(days=CROSS_DOMAIN_LOOKBACK_DAYS)).isoformat()
+        try:
+            return (
+                supabase.table(NUTRITION_TABLE)
+                .select("carbs,logged_at")
+                .eq("email", email)
+                .gte("logged_at", since_iso)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    (
+        daily_entries,
+        habit_entries,
+        recommendation_history,
+        existing_patterns,
+        user_id,
+        cgm_rows,
+        nutrition_rows,
+    ) = run_parallel(
+        _daily_entries, _habit_entries, _recommendation_history, _existing_patterns, _user_id, _cgm_rows, _nutrition_rows
     )
+
+    def _google_steps_rows() -> list[dict[str, object]]:
+        if user_id is None:
+            return []
+        since_iso = (today - timedelta(days=CROSS_DOMAIN_LOOKBACK_DAYS)).isoformat()
+        try:
+            return (
+                supabase.table(HEALTH_ACTIVITY_TABLE)
+                .select("start_time,value")
+                .eq("user_id", user_id)
+                .eq("data_type", "steps")
+                .gte("start_time", since_iso)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return []
+
+    google_steps_rows = _google_steps_rows()
+
+    daily_signals = build_daily_signals(
+        checkin_entries=daily_entries,
+        google_steps_rows=google_steps_rows,
+        cgm_rows=cgm_rows,
+        nutrition_rows=nutrition_rows,
+        today=today,
+        window_days=CROSS_DOMAIN_LOOKBACK_DAYS,
+    )
+
     existing_by_key = {row.get("pattern_key"): row for row in existing_patterns}
 
     drafts = pattern_detection.generate_patterns(
@@ -627,6 +711,7 @@ async def list_patterns(authorization: str | None = Header(default=None)):
         habit_entries=habit_entries,
         recommendation_history=recommendation_history,
         today=today,
+        daily_signals=daily_signals,
     )
 
     result_rows: list[dict[str, object]] = [row for row in existing_patterns if row.get("status") != "discarded"]
