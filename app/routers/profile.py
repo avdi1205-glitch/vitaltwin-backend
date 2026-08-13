@@ -524,6 +524,29 @@ async def export_profile(authorization: str | None = Header(default=None)):
     # as every other category above.
     twin_state_snapshots = _load(SNAPSHOT_TABLE)
 
+    # Health Connect Phase 2.2 fix: automatically-synced health records
+    # (Google Health + Health Connect, `health_activity_records`/
+    # `health_metric_records`/`health_sleep_records`) were NOT included in
+    # this export before — a pre-existing gap unrelated to Health Connect
+    # itself, found while verifying this task's own GDPR requirement.
+    # These 3 tables are `user_id`-keyed (not `email`), so they need the
+    # same identity resolution `chat.py`/`twin_context.py` already use.
+    user_id = get_user_id_by_email(email)
+
+    def _load_health_table(table: str) -> list[dict[str, object]]:
+        if user_id is None:
+            return []
+        try:
+            return supabase.table(table).select("*").eq("user_id", user_id).execute().data or []
+        except Exception:
+            return []
+
+    health_activity_records, health_metric_records, health_sleep_records = run_parallel(
+        lambda: _load_health_table("health_activity_records"),
+        lambda: _load_health_table("health_metric_records"),
+        lambda: _load_health_table("health_sleep_records"),
+    )
+
     bundle = {
         "profile": profile,
         "daily_wellness_entries": daily_wellness_entries,
@@ -543,6 +566,9 @@ async def export_profile(authorization: str | None = Header(default=None)):
         "twin_learning_events": twin_learning_events,
         "twin_state_snapshots": twin_state_snapshots,
         "consents": consents,
+        "health_activity_records": health_activity_records,
+        "health_metric_records": health_metric_records,
+        "health_sleep_records": health_sleep_records,
     }
 
     total_rows = count_total_export_rows(bundle)

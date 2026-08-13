@@ -180,31 +180,238 @@ def normalize_data_point(data_type: str, item: dict[str, object]) -> dict[str, o
     }
 
 
-def normalize_health_connect_steps(item: dict[str, object]) -> dict[str, object] | None:
-    """Health Connect Phase 2 — maps ONE Android Health Connect `StepsRecord`
-    (as returned by `HealthConnectPlugin.readSteps()`: `{id, count, startTime,
-    endTime}`) into the EXACT SAME canonical row shape `normalize_data_point`
-    already produces for "steps" — same keys, same table, same dedupe
-    strategy (Constitution rule 8: one internal shape per provider adapter,
-    never a second canonical model). Returns None if the item can't be
-    meaningfully normalized (caller skips it, never crashes the sync)."""
+# --------------------------------------------------------------------------
+# Health Connect (on-device Android) — Phase 2.2: full wellness data type set.
+#
+# Category -> canonical table (SAME 3 tables Google Health already uses —
+# Constitution rule 17, never a second/parallel data store):
+#   "activity" -> health_activity_records (interval-shaped)
+#   "metric"   -> health_metric_records   (instant-sample-shaped)
+#   "sleep"    -> health_sleep_records    (session/stage-shaped)
+#
+# Deliberately does NOT include "active-minutes" here: unlike Google Health
+# (which reports it as its own derived metric), Android Health Connect has
+# no native "active minutes" record type — only ActiveCaloriesBurnedRecord
+# and ExerciseSessionRecord exist on-device. Listing it here would invent a
+# data type this provider can never actually produce.
+# --------------------------------------------------------------------------
+
+HealthConnectCategory = Literal["activity", "metric", "sleep"]
+
+HEALTH_CONNECT_TYPES: dict[str, HealthConnectCategory] = {
+    "steps": "activity",
+    "distance": "activity",
+    "active-calories": "activity",
+    "total-calories": "activity",
+    "exercise-session": "activity",
+    "heart-rate": "metric",
+    "resting-heart-rate": "metric",
+    "heart-rate-variability": "metric",
+    "oxygen-saturation": "metric",
+    "respiratory-rate": "metric",
+    "body-temperature": "metric",
+    "weight": "metric",
+    "sleep-session": "sleep",
+}
+
+HEALTH_CONNECT_UNITS: dict[str, str | None] = {
+    "steps": "count",
+    "distance": "meter",
+    "active-calories": "kcal",
+    "total-calories": "kcal",
+    "exercise-session": "seconds",
+    "heart-rate": "bpm",
+    "resting-heart-rate": "bpm",
+    "heart-rate-variability": "ms",
+    "oxygen-saturation": "percent",
+    "respiratory-rate": "breaths_per_minute",
+    "body-temperature": "celsius",
+    "weight": "kg",
+}
+
+# Raw JSON field(s) `HealthConnectPlugin.kt` puts the measured value under,
+# per data type (first present numeric key wins) — mirrors the plugin's own
+# per-record-type JSON shape, documented in HealthConnectPlugin.kt.
+_HEALTH_CONNECT_VALUE_KEYS: dict[str, tuple[str, ...]] = {
+    "steps": ("count",),
+    "distance": ("distanceMeters",),
+    "active-calories": ("energyKcal",),
+    "total-calories": ("energyKcal",),
+    "exercise-session": ("durationSeconds",),
+    "heart-rate": ("beatsPerMinute",),
+    "resting-heart-rate": ("beatsPerMinute",),
+    "heart-rate-variability": ("rmssdMillis",),
+    "oxygen-saturation": ("percentage",),
+    "respiratory-rate": ("rate",),
+    "body-temperature": ("temperatureCelsius",),
+    "weight": ("weightKg",),
+}
+
+
+def _hc_numeric_value(item: dict[str, object], value_keys: tuple[str, ...]) -> float | None:
+    for key in value_keys:
+        candidate = item.get(key)
+        if isinstance(candidate, (int, float)):
+            return float(candidate)
+    return None
+
+
+def _hc_interval_activity_row(data_type: str, item: dict[str, object]) -> dict[str, object] | None:
+    """Interval-shaped (has startTime/endTime): steps, distance, calories,
+    exercise sessions."""
     start_time = _parse_dt(item.get("startTime"))
     if not start_time:
         return None
-    count = item.get("count")
-    if not isinstance(count, (int, float)):
+    value = _hc_numeric_value(item, _HEALTH_CONNECT_VALUE_KEYS.get(data_type, ()))
+    if value is None:
         return None
     record_id = item.get("id") if isinstance(item.get("id"), str) else None
-    now_iso = datetime.now(timezone.utc).isoformat()
     return {
         "provider": "health_connect",
         "provider_record_name": record_id,
-        "data_type": "steps",
+        "data_type": data_type,
         "start_time": start_time,
         "end_time": _parse_dt(item.get("endTime")),
-        "value": float(count),
-        "unit": "count",
+        "value": value,
+        "unit": HEALTH_CONNECT_UNITS.get(data_type),
         "source_name": "health_connect",
         "raw_metadata": item,
-        "observed_at": now_iso,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _hc_instant_metric_row(data_type: str, item: dict[str, object]) -> dict[str, object] | None:
+    """Instant-sample-shaped (single `time`): heart rate, resting HR, HRV,
+    SpO2, respiratory rate, body temperature, weight."""
+    observed_at = _parse_dt(item.get("time"))
+    if not observed_at:
+        return None
+    value = _hc_numeric_value(item, _HEALTH_CONNECT_VALUE_KEYS.get(data_type, ()))
+    if value is None:
+        return None
+    record_id = item.get("id") if isinstance(item.get("id"), str) else None
+    return {
+        "provider": "health_connect",
+        "provider_record_name": record_id,
+        "data_type": data_type,
+        "observed_at": observed_at,
+        "start_time": None,
+        "end_time": None,
+        "value": value,
+        "unit": HEALTH_CONNECT_UNITS.get(data_type),
+        "source_name": "health_connect",
+        "raw_metadata": item,
+    }
+
+
+def _hc_duration_seconds(start_iso: str, end_iso: str) -> int | None:
+    try:
+        start = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        return int((end - start).total_seconds())
+    except ValueError:
+        return None
+
+
+def _hc_sleep_session_rows(item: dict[str, object]) -> list[dict[str, object]]:
+    """One row per sleep stage (matches `health_sleep_records`'s existing
+    per-stage row shape) — a stage-less session (some devices only report a
+    session total, no stage breakdown) produces exactly one row with
+    `sleep_stage=None`. Each stage gets a unique `provider_record_name`
+    (`<sessionId>:stage:<index>`) so the dedupe index never collides
+    multiple stages of the SAME session onto one row."""
+    record_id = item.get("id") if isinstance(item.get("id"), str) else None
+    stages = item.get("stages") if isinstance(item.get("stages"), list) else []
+    rows: list[dict[str, object]] = []
+    for idx, stage in enumerate(stages):
+        if not isinstance(stage, dict):
+            continue
+        stage_start = _parse_dt(stage.get("startTime"))
+        stage_end = _parse_dt(stage.get("endTime"))
+        if not stage_start or not stage_end:
+            continue
+        rows.append(
+            {
+                "provider": "health_connect",
+                "provider_record_name": f"{record_id}:stage:{idx}" if record_id else None,
+                "start_time": stage_start,
+                "end_time": stage_end,
+                "duration_seconds": _hc_duration_seconds(stage_start, stage_end),
+                "sleep_stage": stage.get("stage") if isinstance(stage.get("stage"), str) else None,
+                "source_name": "health_connect",
+                "raw_metadata": stage,
+            }
+        )
+    if rows:
+        return rows
+
+    session_start = _parse_dt(item.get("startTime"))
+    session_end = _parse_dt(item.get("endTime"))
+    if not session_start or not session_end:
+        return []
+    return [
+        {
+            "provider": "health_connect",
+            "provider_record_name": record_id,
+            "start_time": session_start,
+            "end_time": session_end,
+            "duration_seconds": _hc_duration_seconds(session_start, session_end),
+            "sleep_stage": None,
+            "source_name": "health_connect",
+            "raw_metadata": item,
+        }
+    ]
+
+
+def normalize_health_connect_record(data_type: str, item: dict[str, object]) -> list[dict[str, object]]:
+    """Generic Health Connect (on-device) normalizer covering every
+    supported data type in `HEALTH_CONNECT_TYPES` — dispatches by category
+    to the correct canonical shape. Always returns a LIST (0, 1, or many
+    rows — a sleep session with stages produces one row per stage) so one
+    malformed/unrecognized item never crashes the whole sync; the caller
+    simply upserts whatever rows come back. Unknown `data_type` -> `[]`
+    (reported as unsupported by the router, never silently guessed)."""
+    category = HEALTH_CONNECT_TYPES.get(data_type)
+    if category is None:
+        return []
+    if category == "sleep":
+        return _hc_sleep_session_rows(item)
+    if category == "activity":
+        row = _hc_interval_activity_row(data_type, item)
+    else:
+        row = _hc_instant_metric_row(data_type, item)
+    return [row] if row else []
+
+
+def health_connect_table_for(data_type: str) -> str | None:
+    """Which canonical table a Health Connect `data_type` upserts into —
+    used by the sync router. Returns None for an unsupported/unknown type
+    (caller reports it rather than guessing a table)."""
+    category = HEALTH_CONNECT_TYPES.get(data_type)
+    if category == "activity":
+        return "health_activity_records"
+    if category == "metric":
+        return "health_metric_records"
+    if category == "sleep":
+        return "health_sleep_records"
+    return None
+
+
+def health_connect_conflict_columns(data_type: str) -> str:
+    """Health-Connect-specific dedupe/on_conflict columns — deliberately
+    NOT reusing `health_sync_service._conflict_columns` (that one looks up
+    Google Health's `DATA_TYPE_CONFIG`, which doesn't contain Health-Connect
+    -only types like `resting-heart-rate`/`exercise-session`/`sleep-session`
+    and would raise `KeyError`)."""
+    if HEALTH_CONNECT_TYPES.get(data_type) == "sleep":
+        return "user_id,provider_record_name"
+    return "user_id,data_type,provider_record_name"
+
+
+def normalize_health_connect_steps(item: dict[str, object]) -> dict[str, object] | None:
+    """Health Connect Phase 2's original steps-only normalizer — kept as a
+    thin backward-compatible wrapper around the generic
+    `normalize_health_connect_record` (Phase 2.2) so existing callers/tests
+    referencing this exact name/shape keep working unchanged."""
+    rows = normalize_health_connect_record("steps", item)
+    return rows[0] if rows else None

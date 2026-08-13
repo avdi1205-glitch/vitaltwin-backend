@@ -61,6 +61,18 @@ SIGNAL_CONFIG: dict[str, dict[str, object]] = {
     "heart_rate": {"table": "health_metric_records", "data_type": "heart-rate", "time_field": "observed_at", "value_field": "value", "agg": "average", "unit": "bpm"},
     "weight": {"table": "health_metric_records", "data_type": "weight", "time_field": "observed_at", "value_field": "value", "agg": "average", "unit": "kg"},
     "sleep_duration": {"table": "health_sleep_records", "data_type": None, "time_field": "start_time", "value_field": "duration_seconds", "agg": "sum", "unit": "Sekunden"},
+    # Health Connect Phase 2.2 additions — same generic block mechanism,
+    # no new consumer architecture needed. "exercise_session" is
+    # deliberately NOT here: it's a discrete session (type/duration/title),
+    # not a simple daily scalar, so it's stored canonically but reported as
+    # "available but not yet consumed" rather than forced into this shape.
+    "active_calories": {"table": "health_activity_records", "data_type": "active-calories", "time_field": "start_time", "value_field": "value", "agg": "sum", "unit": "kcal"},
+    "total_calories": {"table": "health_activity_records", "data_type": "total-calories", "time_field": "start_time", "value_field": "value", "agg": "sum", "unit": "kcal"},
+    "resting_heart_rate": {"table": "health_metric_records", "data_type": "resting-heart-rate", "time_field": "observed_at", "value_field": "value", "agg": "average", "unit": "bpm"},
+    "heart_rate_variability": {"table": "health_metric_records", "data_type": "heart-rate-variability", "time_field": "observed_at", "value_field": "value", "agg": "average", "unit": "ms"},
+    "oxygen_saturation": {"table": "health_metric_records", "data_type": "oxygen-saturation", "time_field": "observed_at", "value_field": "value", "agg": "average", "unit": "%"},
+    "respiratory_rate": {"table": "health_metric_records", "data_type": "respiratory-rate", "time_field": "observed_at", "value_field": "value", "agg": "average", "unit": "Atemzüge/min"},
+    "body_temperature": {"table": "health_metric_records", "data_type": "body-temperature", "time_field": "observed_at", "value_field": "value", "agg": "average", "unit": "°C"},
 }
 
 TABLES_FOR_SIGNALS = {str(config["table"]) for config in SIGNAL_CONFIG.values()}
@@ -205,6 +217,43 @@ def resolve_trend_source(
     manual_trend = compute_trend(manual_entries, field=manual_field, window_days=window_days, today=today)
     source = SOURCE_MANUAL_CHECKIN if manual_trend.data_points > 0 else SOURCE_NONE
     return ResolvedTrend(signal=signal, source=source, trend=manual_trend)
+
+
+def resolve_two_tier_source(
+    *,
+    signal: str,
+    google_rows: list[dict[str, object]],
+    today: date,
+    window_days: int = RECENT_WINDOW_DAYS,
+    health_connect_rows: list[dict[str, object]] | None = None,
+) -> ResolvedTrend:
+    """Health Connect Phase 2.2 — Google Health -> Health Connect precedence
+    (NO manual fallback tier) for signals with no manual check-in
+    counterpart at all (distance, active/total calories, heart rate and its
+    variants, weight, SpO2, respiratory rate, body temperature). Same
+    never-summed-across-sources contract as `resolve_trend_source` — the
+    caller must fetch `google_rows`/`health_connect_rows` as two SEPARATE
+    provider-filtered queries so the same day is never double-counted."""
+    config = SIGNAL_CONFIG[signal]
+    google_daily = daily_aggregate(
+        google_rows, time_field=str(config["time_field"]), value_field=str(config["value_field"]), agg=str(config["agg"])
+    )
+    google_trend = compute_trend(google_daily, field="value", window_days=window_days, today=today)
+    if google_trend.data_points > 0:
+        return ResolvedTrend(signal=signal, source=SOURCE_GOOGLE_HEALTH, trend=google_trend)
+
+    if health_connect_rows:
+        health_connect_daily = daily_aggregate(
+            health_connect_rows,
+            time_field=str(config["time_field"]),
+            value_field=str(config["value_field"]),
+            agg=str(config["agg"]),
+        )
+        health_connect_trend = compute_trend(health_connect_daily, field="value", window_days=window_days, today=today)
+        if health_connect_trend.data_points > 0:
+            return ResolvedTrend(signal=signal, source=SOURCE_HEALTH_CONNECT, trend=health_connect_trend)
+
+    return ResolvedTrend(signal=signal, source=SOURCE_NONE, trend=google_trend)
 
 
 def signal_to_context_dict(result: GoogleHealthSignal | ResolvedTrend, *, unit: str | None = None) -> dict[str, object]:

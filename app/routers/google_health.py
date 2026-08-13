@@ -39,7 +39,7 @@ from ..core.health_errors import (
     HEALTH_REAUTH_REQUIRED,
     HealthIntegrationError,
 )
-from ..core.health_normalization_service import DATA_TYPE_CONFIG
+from ..core.health_normalization_service import DATA_TYPE_CONFIG, HEALTH_CONNECT_TYPES
 from ..core.health_sync_service import sync_user_health_data
 from ..core.plan_service import has_feature
 from ..core.rate_limit import enforce_rate_limit
@@ -272,6 +272,18 @@ async def google_health_sync(request: Request, authorization: str | None = Heade
     return result
 
 
+def _valid_data_type(data_type: str, category: str) -> bool:
+    """A `?data_type=` filter is valid if it's a real Google Health type OR
+    a real Health Connect type for the requested category — Health Connect
+    Phase 2.2 fix: this used to only recognize Google Health's own
+    `DATA_TYPE_CONFIG`, so filtering by e.g. `resting-heart-rate` (a
+    Health-Connect-only type) was wrongly rejected even though real rows
+    with that data_type now legitimately exist in the table."""
+    if data_type in DATA_TYPE_CONFIG:
+        return DATA_TYPE_CONFIG[data_type].category == category
+    return HEALTH_CONNECT_TYPES.get(data_type) == category
+
+
 def _query_records(*, table: str, user_id: int, data_type: str | None, limit: int, order_column: str):
     query = supabase.table(table).select("*").eq("user_id", user_id)
     if data_type:
@@ -285,7 +297,7 @@ async def get_activity_data(
     data_type: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)
 ):
     user_id = _require_user_id(authorization)
-    if data_type and (data_type not in DATA_TYPE_CONFIG or DATA_TYPE_CONFIG[data_type].category != "activity"):
+    if data_type and not _valid_data_type(data_type, "activity"):
         raise HTTPException(status_code=400, detail="Ungültiger data_type für Aktivitätsdaten.")
     items = _query_records(
         table="health_activity_records", user_id=user_id, data_type=data_type, limit=limit, order_column="start_time"
@@ -307,7 +319,7 @@ async def get_metric_data(
     data_type: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)
 ):
     user_id = _require_user_id(authorization)
-    if data_type and (data_type not in DATA_TYPE_CONFIG or DATA_TYPE_CONFIG[data_type].category != "metric"):
+    if data_type and not _valid_data_type(data_type, "metric"):
         raise HTTPException(status_code=400, detail="Ungültiger data_type für Metrik-Daten.")
     items = _query_records(
         table="health_metric_records", user_id=user_id, data_type=data_type, limit=limit, order_column="observed_at"

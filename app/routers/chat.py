@@ -559,9 +559,10 @@ def _build_google_health_context(
     google_rows_by_signal = dict(
         zip(signal_names, run_parallel(*[lambda s=name: _rows(s, "google_health") for name in signal_names]))
     )
-    # Only "steps" can currently come from Health Connect (Phase 2 —
-    # READ_STEPS only); fetching it for every signal keeps this loop
-    # uniform and future-proof at negligible cost (empty result for the rest).
+    # Health Connect Phase 2.2: on-device sync now covers most signals here
+    # (not just steps) — fetching every signal for both providers keeps
+    # this loop uniform; a signal Health Connect never produces simply
+    # comes back empty at negligible cost.
     health_connect_rows_by_signal = dict(
         zip(signal_names, run_parallel(*[lambda s=name: _rows(s, "health_connect") for name in signal_names]))
     )
@@ -583,8 +584,18 @@ def _build_google_health_context(
             )
             result[signal] = ghs.signal_to_context_dict(resolved, unit=str(ghs.SIGNAL_CONFIG[signal]["unit"]))
         else:
-            built = ghs.build_signal(rows, signal=signal, today=today)
-            result[signal] = ghs.signal_to_context_dict(built)
+            # No manual counterpart exists for these signals — still apply
+            # Google Health -> Health Connect precedence (Health Connect
+            # Phase 2.2 fix: previously these rows were fetched but
+            # silently discarded here, so on-device data for e.g. weight/
+            # heart rate never actually reached the Twin context).
+            resolved = ghs.resolve_two_tier_source(
+                signal=signal,
+                google_rows=rows,
+                today=today,
+                health_connect_rows=health_connect_rows_by_signal[signal],
+            )
+            result[signal] = ghs.signal_to_context_dict(resolved, unit=str(ghs.SIGNAL_CONFIG[signal]["unit"]))
     return result
 
 

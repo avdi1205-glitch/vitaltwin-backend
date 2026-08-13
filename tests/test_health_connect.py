@@ -148,11 +148,14 @@ class TestHealthConnectSyncEndpoint:
         _auth_as(monkeypatch, user_id=42)
         resp = client.post(
             "/api/health/health-connect/sync",
-            json={"records": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z", "endTime": "2026-08-13T09:00:00Z"}]},
+            json={"records": {"steps": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z", "endTime": "2026-08-13T09:00:00Z"}]}},
             headers={"Authorization": "Bearer t"},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"received": 1, "stored": 1, "skipped": 0, "debug_last_error": None}
+        body = resp.json()
+        assert body["results"]["steps"] == {"received": 1, "stored": 1, "skipped": 0}
+        assert body["unsupported_types"] == []
+        assert body["debug_last_error"] is None
         rows = fake_supabase.tables["health_activity_records"]
         assert len(rows) == 1
         assert rows[0]["provider"] == "health_connect"
@@ -163,7 +166,7 @@ class TestHealthConnectSyncEndpoint:
 
     def test_resyncing_the_same_record_does_not_duplicate(self, client, fake_supabase, monkeypatch):
         _auth_as(monkeypatch, user_id=42)
-        payload = {"records": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z"}]}
+        payload = {"records": {"steps": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z"}]}}
         client.post("/api/health/health-connect/sync", json=payload, headers={"Authorization": "Bearer t"})
         client.post("/api/health/health-connect/sync", json=payload, headers={"Authorization": "Bearer t"})
         assert len(fake_supabase.tables["health_activity_records"]) == 1
@@ -172,13 +175,13 @@ class TestHealthConnectSyncEndpoint:
         _auth_as(monkeypatch, user_id=1)
         client.post(
             "/api/health/health-connect/sync",
-            json={"records": [{"id": "a", "count": 100, "startTime": "2026-08-13T08:00:00Z"}]},
+            json={"records": {"steps": [{"id": "a", "count": 100, "startTime": "2026-08-13T08:00:00Z"}]}},
             headers={"Authorization": "Bearer t"},
         )
         _auth_as(monkeypatch, user_id=2)
         client.post(
             "/api/health/health-connect/sync",
-            json={"records": [{"id": "b", "count": 200, "startTime": "2026-08-13T08:00:00Z"}]},
+            json={"records": {"steps": [{"id": "b", "count": 200, "startTime": "2026-08-13T08:00:00Z"}]}},
             headers={"Authorization": "Bearer t"},
         )
         rows = fake_supabase.tables["health_activity_records"]
@@ -190,25 +193,141 @@ class TestHealthConnectSyncEndpoint:
         _auth_as(monkeypatch, user_id=42)
         resp = client.post(
             "/api/health/health-connect/sync",
-            json={"records": [{"id": "bad", "count": 1, "startTime": ""}]},
+            json={"records": {"steps": [{"id": "bad", "count": 1, "startTime": ""}]}},
             headers={"Authorization": "Bearer t"},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"received": 1, "stored": 0, "skipped": 1, "debug_last_error": None}
+        assert resp.json()["results"]["steps"] == {"received": 1, "stored": 0, "skipped": 1}
 
     def test_denied_without_entitlement(self, client, fake_supabase, monkeypatch):
         _auth_as(monkeypatch, user_id=42)
         monkeypatch.setattr(router_module, "has_feature", lambda email, feature: False)
         resp = client.post(
             "/api/health/health-connect/sync",
-            json={"records": []},
+            json={"records": {}},
             headers={"Authorization": "Bearer t"},
         )
         assert resp.status_code == 403
 
     def test_requires_auth(self, client):
-        resp = client.post("/api/health/health-connect/sync", json={"records": []})
+        resp = client.post("/api/health/health-connect/sync", json={"records": {}})
         assert resp.status_code == 401
+
+    def test_unsupported_data_type_is_reported_not_guessed(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {"blood-pressure": [{"id": "x"}]}},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["unsupported_types"] == ["blood-pressure"]
+        assert body["results"] == {}
+
+    def test_metric_type_stores_into_health_metric_records(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {"resting-heart-rate": [{"id": "rhr-1", "beatsPerMinute": 58, "time": "2026-08-13T05:00:00Z"}]}},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["results"]["resting-heart-rate"] == {"received": 1, "stored": 1, "skipped": 0}
+        rows = fake_supabase.tables["health_metric_records"]
+        assert rows[0]["provider"] == "health_connect"
+        assert rows[0]["data_type"] == "resting-heart-rate"
+        assert rows[0]["value"] == 58.0
+        assert rows[0]["unit"] == "bpm"
+
+    def test_exercise_session_stores_duration_and_metadata(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={
+                "records": {
+                    "exercise-session": [
+                        {
+                            "id": "ex-1",
+                            "durationSeconds": 1800,
+                            "exerciseType": "running",
+                            "title": "Morning run",
+                            "startTime": "2026-08-13T06:00:00Z",
+                            "endTime": "2026-08-13T06:30:00Z",
+                        }
+                    ]
+                }
+            },
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        rows = fake_supabase.tables["health_activity_records"]
+        assert rows[0]["data_type"] == "exercise-session"
+        assert rows[0]["value"] == 1800.0
+        assert rows[0]["raw_metadata"]["exerciseType"] == "running"
+
+    def test_sleep_session_with_stages_produces_one_row_per_stage(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={
+                "records": {
+                    "sleep-session": [
+                        {
+                            "id": "sleep-1",
+                            "startTime": "2026-08-13T22:00:00Z",
+                            "endTime": "2026-08-14T06:00:00Z",
+                            "stages": [
+                                {"stage": "deep", "startTime": "2026-08-13T22:00:00Z", "endTime": "2026-08-13T23:00:00Z"},
+                                {"stage": "rem", "startTime": "2026-08-13T23:00:00Z", "endTime": "2026-08-14T00:00:00Z"},
+                            ],
+                        }
+                    ]
+                }
+            },
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["results"]["sleep-session"] == {"received": 1, "stored": 2, "skipped": 0}
+        rows = fake_supabase.tables["health_sleep_records"]
+        assert len(rows) == 2
+        assert {r["provider_record_name"] for r in rows} == {"sleep-1:stage:0", "sleep-1:stage:1"}
+        assert {r["sleep_stage"] for r in rows} == {"deep", "rem"}
+        assert rows[0]["duration_seconds"] == 3600
+
+    def test_sleep_session_without_stages_produces_one_summary_row(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={
+                "records": {
+                    "sleep-session": [
+                        {"id": "sleep-2", "startTime": "2026-08-13T22:00:00Z", "endTime": "2026-08-14T06:00:00Z"}
+                    ]
+                }
+            },
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        rows = fake_supabase.tables["health_sleep_records"]
+        assert len(rows) == 1
+        assert rows[0]["sleep_stage"] is None
+        assert rows[0]["provider_record_name"] == "sleep-2"
+        assert rows[0]["duration_seconds"] == 8 * 3600
+
+    def test_permission_denied_category_is_simply_absent_others_still_work(self, client, fake_supabase, monkeypatch):
+        """No special-casing needed: a category the user never granted is
+        simply never included in the payload — the other categories must
+        still sync normally."""
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {"steps": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z"}]}},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        assert "weight" not in resp.json()["results"]
+        assert resp.json()["results"]["steps"]["stored"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -266,3 +385,77 @@ class TestResolveTrendSourceHealthConnectTier:
             today=self.TODAY,
         )
         assert resolved.source == ghs.SOURCE_MANUAL_CHECKIN
+
+
+# ---------------------------------------------------------------------------
+# resolve_two_tier_source — Google Health > Health Connect, NO manual
+# fallback (signals with no manual check-in counterpart at all).
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTwoTierSource:
+    TODAY = date(2026, 8, 13)
+
+    def _row(self, days_ago: int, value: float) -> dict[str, object]:
+        d = self.TODAY - timedelta(days=days_ago)
+        return {"observed_at": f"{d.isoformat()}T08:00:00Z", "value": value}
+
+    def test_google_health_wins_when_present(self):
+        resolved = ghs.resolve_two_tier_source(
+            signal="weight",
+            google_rows=[self._row(1, 82.0)],
+            today=self.TODAY,
+            health_connect_rows=[self._row(1, 80.0)],
+        )
+        assert resolved.source == ghs.SOURCE_GOOGLE_HEALTH
+        assert resolved.trend.average == 82.0
+
+    def test_falls_back_to_health_connect_when_google_health_empty(self):
+        resolved = ghs.resolve_two_tier_source(
+            signal="resting_heart_rate",
+            google_rows=[],
+            today=self.TODAY,
+            health_connect_rows=[self._row(1, 58.0)],
+        )
+        assert resolved.source == ghs.SOURCE_HEALTH_CONNECT
+        assert resolved.trend.data_points == 1
+
+    def test_no_manual_fallback_neither_source_has_data(self):
+        resolved = ghs.resolve_two_tier_source(
+            signal="oxygen_saturation",
+            google_rows=[],
+            today=self.TODAY,
+            health_connect_rows=[],
+        )
+        assert resolved.source == ghs.SOURCE_NONE
+        assert resolved.trend.data_points == 0
+
+
+# ---------------------------------------------------------------------------
+# normalize_health_connect_record — generic Phase 2.2 normalizer
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeHealthConnectRecord:
+    def test_unknown_data_type_returns_empty_list(self):
+        from app.core.health_normalization_service import normalize_health_connect_record
+
+        assert normalize_health_connect_record("blood-pressure", {"id": "x"}) == []
+
+    def test_instant_metric_shape(self):
+        from app.core.health_normalization_service import normalize_health_connect_record
+
+        rows = normalize_health_connect_record(
+            "heart-rate-variability", {"id": "hrv-1", "rmssdMillis": 42.5, "time": "2026-08-13T05:00:00Z"}
+        )
+        assert len(rows) == 1
+        assert rows[0]["data_type"] == "heart-rate-variability"
+        assert rows[0]["value"] == 42.5
+        assert rows[0]["unit"] == "ms"
+        assert rows[0]["observed_at"] == "2026-08-13T05:00:00Z"
+        assert rows[0]["start_time"] is None
+
+    def test_missing_value_key_returns_empty_list(self):
+        from app.core.health_normalization_service import normalize_health_connect_record
+
+        assert normalize_health_connect_record("weight", {"id": "w1", "time": "2026-08-13T05:00:00Z"}) == []

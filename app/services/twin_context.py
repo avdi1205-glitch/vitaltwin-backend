@@ -60,6 +60,14 @@ GOOGLE_HEALTH_LABELS = {
     "distance": "Distanz",
     "heart_rate": "Herzfrequenz",
     "weight": "Gewicht",
+    # Health Connect Phase 2.2 additions.
+    "active_calories": "Aktive Kalorien",
+    "total_calories": "Gesamtkalorien",
+    "resting_heart_rate": "Ruheherzfrequenz",
+    "heart_rate_variability": "Herzfrequenzvariabilität (HRV)",
+    "oxygen_saturation": "Sauerstoffsättigung (SpO2)",
+    "respiratory_rate": "Atemfrequenz",
+    "body_temperature": "Körpertemperatur",
 }
 
 # Twin Core Phase 2 (CGM + Nutrition -> Twin Intelligence). Same
