@@ -152,7 +152,7 @@ class TestHealthConnectSyncEndpoint:
             headers={"Authorization": "Bearer t"},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"received": 1, "stored": 1, "skipped": 0}
+        assert resp.json() == {"received": 1, "stored": 1, "skipped": 0, "debug_last_error": None}
         rows = fake_supabase.tables["health_activity_records"]
         assert len(rows) == 1
         assert rows[0]["provider"] == "health_connect"
@@ -194,7 +194,7 @@ class TestHealthConnectSyncEndpoint:
             headers={"Authorization": "Bearer t"},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"received": 1, "stored": 0, "skipped": 1}
+        assert resp.json() == {"received": 1, "stored": 0, "skipped": 1, "debug_last_error": None}
 
     def test_denied_without_entitlement(self, client, fake_supabase, monkeypatch):
         _auth_as(monkeypatch, user_id=42)

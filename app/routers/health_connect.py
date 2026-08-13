@@ -65,6 +65,7 @@ async def health_connect_sync(body: HealthConnectSyncRequest, authorization: str
     received = len(body.records)
     stored = 0
     skipped = 0
+    debug_last_error: str | None = None
 
     for record in body.records:
         normalized = normalize_health_connect_steps(record.model_dump())
@@ -79,7 +80,8 @@ async def health_connect_sync(body: HealthConnectSyncRequest, authorization: str
                 on_conflict=_conflict_columns("steps"),
             ).execute()
             stored += 1
-        except Exception:
+        except Exception as exc:
             skipped += 1
+            debug_last_error = str(exc)[:300]
 
-    return {"received": received, "stored": stored, "skipped": skipped}
+    return {"received": received, "stored": stored, "skipped": skipped, "debug_last_error": debug_last_error}
