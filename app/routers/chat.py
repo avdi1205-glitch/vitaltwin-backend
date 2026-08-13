@@ -512,15 +512,24 @@ def _build_context_for_user(email: str, plan: str) -> tuple[str, list[dict[str, 
     return context.text, sources, context.truncated, profile
 
 
-def _load_google_health_rows(user_id: int, table: str, *, data_type: str | None, since_iso: str) -> list[dict[str, object]]:
+def _load_google_health_rows(
+    user_id: int, table: str, *, data_type: str | None, since_iso: str, provider: str | None = None
+) -> list[dict[str, object]]:
     # Google Health tables are `user_id`-keyed (never `email`) — an
     # explicit `.eq("user_id", user_id)` here is the ONLY thing standing
     # between one user's automatically-synced health data and another's
-    # Twin context (Step 8: strict user isolation).
+    # Twin context (Step 8: strict user isolation). `provider` defaults to
+    # None (no filter) to keep any other existing caller byte-identical;
+    # `_build_google_health_context` below always passes it explicitly now
+    # so Google Health and Health Connect rows are never blended into one
+    # unfiltered query (Health Connect Phase 2 — prevents double-counting a
+    # day that has automatic steps from both sources).
     try:
         query = supabase.table(table).select("*").eq("user_id", user_id)
         if data_type:
             query = query.eq("data_type", data_type)
+        if provider:
+            query = query.eq("provider", provider)
         time_field = "observed_at" if table == HEALTH_METRIC_TABLE else "start_time"
         return query.gte(time_field, since_iso).execute().data or []
     except Exception:
@@ -540,24 +549,37 @@ def _build_google_health_context(
 
     since_iso = (today - timedelta(days=GOOGLE_HEALTH_LOOKBACK_DAYS)).isoformat()
 
-    def _rows(signal: str) -> list[dict[str, object]]:
+    def _rows(signal: str, provider: str) -> list[dict[str, object]]:
         config = ghs.SIGNAL_CONFIG[signal]
         return _load_google_health_rows(
-            user_id, str(config["table"]), data_type=config.get("data_type"), since_iso=since_iso
+            user_id, str(config["table"]), data_type=config.get("data_type"), since_iso=since_iso, provider=provider
         )
 
     signal_names = list(ghs.SIGNAL_CONFIG.keys())
-    rows_by_signal = dict(zip(signal_names, run_parallel(*[lambda s=name: _rows(s) for name in signal_names])))
+    google_rows_by_signal = dict(
+        zip(signal_names, run_parallel(*[lambda s=name: _rows(s, "google_health") for name in signal_names]))
+    )
+    # Only "steps" can currently come from Health Connect (Phase 2 —
+    # READ_STEPS only); fetching it for every signal keeps this loop
+    # uniform and future-proof at negligible cost (empty result for the rest).
+    health_connect_rows_by_signal = dict(
+        zip(signal_names, run_parallel(*[lambda s=name: _rows(s, "health_connect") for name in signal_names]))
+    )
 
     result: dict[str, dict[str, object]] = {}
     for signal in signal_names:
-        rows = rows_by_signal[signal]
+        rows = google_rows_by_signal[signal]
         if signal in ghs.MANUAL_FIELD_FOR_SIGNAL:
             # Step 5: source precedence — real Google Health data wins when
-            # present, manual check-in data is the fallback; neither
-            # history is ever modified.
+            # present, Health Connect is the next automatic tier, manual
+            # check-in data is the final fallback; neither history is ever
+            # modified.
             resolved = ghs.resolve_trend_source(
-                signal=signal, google_rows=rows, manual_entries=daily_entries, today=today
+                signal=signal,
+                google_rows=rows,
+                manual_entries=daily_entries,
+                today=today,
+                health_connect_rows=health_connect_rows_by_signal[signal],
             )
             result[signal] = ghs.signal_to_context_dict(resolved, unit=str(ghs.SIGNAL_CONFIG[signal]["unit"]))
         else:

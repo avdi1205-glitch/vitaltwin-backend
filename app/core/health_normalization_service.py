@@ -178,3 +178,33 @@ def normalize_data_point(data_type: str, item: dict[str, object]) -> dict[str, o
         "source_name": source_name,
         "raw_metadata": item,
     }
+
+
+def normalize_health_connect_steps(item: dict[str, object]) -> dict[str, object] | None:
+    """Health Connect Phase 2 — maps ONE Android Health Connect `StepsRecord`
+    (as returned by `HealthConnectPlugin.readSteps()`: `{id, count, startTime,
+    endTime}`) into the EXACT SAME canonical row shape `normalize_data_point`
+    already produces for "steps" — same keys, same table, same dedupe
+    strategy (Constitution rule 8: one internal shape per provider adapter,
+    never a second canonical model). Returns None if the item can't be
+    meaningfully normalized (caller skips it, never crashes the sync)."""
+    start_time = _parse_dt(item.get("startTime"))
+    if not start_time:
+        return None
+    count = item.get("count")
+    if not isinstance(count, (int, float)):
+        return None
+    record_id = item.get("id") if isinstance(item.get("id"), str) else None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    return {
+        "provider": "health_connect",
+        "provider_record_name": record_id,
+        "data_type": "steps",
+        "start_time": start_time,
+        "end_time": _parse_dt(item.get("endTime")),
+        "value": float(count),
+        "unit": "count",
+        "source_name": "health_connect",
+        "raw_metadata": item,
+        "observed_at": now_iso,
+    }

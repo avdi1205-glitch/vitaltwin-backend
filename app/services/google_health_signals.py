@@ -42,6 +42,7 @@ from .trends import TrendResult, compute_trend
 from .twin_signal_shared import daily_aggregate, latest_value
 
 SOURCE_GOOGLE_HEALTH = "google_health"
+SOURCE_HEALTH_CONNECT = "health_connect"
 SOURCE_MANUAL_CHECKIN = "manual_checkin"
 SOURCE_NONE = "none"
 
@@ -165,14 +166,22 @@ def resolve_trend_source(
     manual_entries: list[dict[str, object]],
     today: date,
     window_days: int = RECENT_WINDOW_DAYS,
+    health_connect_rows: list[dict[str, object]] | None = None,
 ) -> ResolvedTrend:
     """Step 5 — deterministic, read-time-only precedence: real Google
     Health data (automatic, objective) is preferred when it exists for the
-    requested window; manual check-in data is the fallback. Neither source
-    is ever modified — this only decides which one a given Twin
-    computation reads. Only valid for signals in `MANUAL_FIELD_FOR_SIGNAL`;
-    every other signal has no manual counterpart, so callers should use
-    `build_signal` directly for those."""
+    requested window; Health Connect (Phase 2, also automatic) is the next
+    tier when Google Health has none for the window; manual check-in data
+    is the final fallback. Neither source is ever modified — this only
+    decides which one a given Twin computation reads. `health_connect_rows`
+    defaults to `None` (100% identical to the pre-Phase-2 2-tier behavior)
+    so existing callers that don't pass it are completely unaffected — this
+    also means two automatic sources reporting the SAME day are never
+    silently summed together (each caller must fetch google_rows and
+    health_connect_rows as two SEPARATE provider-filtered queries, never one
+    unfiltered query, to avoid double-counting). Only valid for signals in
+    `MANUAL_FIELD_FOR_SIGNAL`; every other signal has no manual counterpart,
+    so callers should use `build_signal` directly for those."""
     config = SIGNAL_CONFIG[signal]
     google_daily = daily_aggregate(
         google_rows, time_field=str(config["time_field"]), value_field=str(config["value_field"]), agg=str(config["agg"])
@@ -180,6 +189,17 @@ def resolve_trend_source(
     google_trend = compute_trend(google_daily, field="value", window_days=window_days, today=today)
     if google_trend.data_points > 0:
         return ResolvedTrend(signal=signal, source=SOURCE_GOOGLE_HEALTH, trend=google_trend)
+
+    if health_connect_rows:
+        health_connect_daily = daily_aggregate(
+            health_connect_rows,
+            time_field=str(config["time_field"]),
+            value_field=str(config["value_field"]),
+            agg=str(config["agg"]),
+        )
+        health_connect_trend = compute_trend(health_connect_daily, field="value", window_days=window_days, today=today)
+        if health_connect_trend.data_points > 0:
+            return ResolvedTrend(signal=signal, source=SOURCE_HEALTH_CONNECT, trend=health_connect_trend)
 
     manual_field = MANUAL_FIELD_FOR_SIGNAL[signal]
     manual_trend = compute_trend(manual_entries, field=manual_field, window_days=window_days, today=today)
