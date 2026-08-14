@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from ..core.supabase import supabase
+from ..core.locale import resolve_locale
 from ..core.auth import require_email as _require_email_dependency
 from ..core.auth import get_user_id_by_email
 from ..core.audit import record_audit_event
@@ -420,8 +421,9 @@ async def update_profile(data: ProfileUpdate, authorization: str | None = Header
 
 
 @router.post("/request-deletion")
-async def request_deletion(authorization: str | None = Header(default=None)):
+async def request_deletion(authorization: str | None = Header(default=None), locale: str | None = None):
     email = _require_email(authorization)
+    resolved_locale = resolve_locale(locale)
     now_iso = datetime.now(timezone.utc).isoformat()
 
     try:
@@ -431,14 +433,26 @@ async def request_deletion(authorization: str | None = Header(default=None)):
         else:
             supabase.table(PROFILE_TABLE).insert({"email": email, "deletion_requested_at": now_iso}).execute()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail="Löschanfrage konnte nicht gespeichert werden.") from exc
+        detail = {
+            "de": "Löschanfrage konnte nicht gespeichert werden.",
+            "en": "Could not save deletion request.",
+        }[resolved_locale]
+        raise HTTPException(status_code=500, detail=detail) from exc
 
     record_audit_event(user_id=None, email=email, action="deletion_request", entity_type="account")
 
-    return {
-        "message": "Deine Löschanfrage wurde gespeichert. Wir melden uns per E-Mail und bearbeiten sie manuell, "
-        "um versehentlichen Datenverlust auszuschließen. Du kannst uns auch direkt unter info@vitaltwin.de erreichen.",
-    }
+    message = {
+        "de": (
+            "Deine Löschanfrage wurde gespeichert. Wir melden uns per E-Mail und bearbeiten sie manuell, "
+            "um versehentlichen Datenverlust auszuschließen. Du kannst uns auch direkt unter info@vitaltwin.de erreichen."
+        ),
+        "en": (
+            "Your deletion request has been saved. We'll get in touch by email and review it manually to rule out "
+            "accidental data loss. You can also always reach us directly at info@vitaltwin.de."
+        ),
+    }[resolved_locale]
+
+    return {"message": message}
 
 
 @router.get("/export")
@@ -1093,7 +1107,7 @@ async def get_advanced_twin_overview(authorization: str | None = Header(default=
 
 
 @router.get("/twin-evolution")
-async def get_twin_evolution(authorization: str | None = Header(default=None)):
+async def get_twin_evolution(authorization: str | None = Header(default=None), locale: str | None = None):
     """Twin Core Phase 7 -- "Wie sich dein Twin entwickelt". Builds ONE
     fresh Unified Twin State (`services/unified_twin_state.py` -- the same
     single source of truth every other Twin Core composition already
@@ -1105,6 +1119,7 @@ async def get_twin_evolution(authorization: str | None = Header(default=None)):
     earlier snapshot -- never raw JSON/internal snapshot terminology, never
     a medical claim."""
     email = _require_email(authorization)
+    resolved_locale = resolve_locale(locale)
     today = date.today()
 
     def _daily_entries() -> list[dict[str, object]]:
@@ -1322,9 +1337,10 @@ async def get_twin_evolution(authorization: str | None = Header(default=None)):
         new_snapshot_state,
         older_created_at=last_snapshot.get("created_at") if last_snapshot else None,
         newer_created_at=datetime.now(timezone.utc).isoformat(),
+        locale=resolved_locale,
     )
     baseline_history = compare_behavioral_baseline(
-        baseline_snapshot.get("snapshot") if baseline_snapshot else None, new_snapshot_state
+        baseline_snapshot.get("snapshot") if baseline_snapshot else None, new_snapshot_state, locale=resolved_locale
     )
 
     active_domain_count = sum(

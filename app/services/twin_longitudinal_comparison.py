@@ -44,6 +44,18 @@ TREND_FIELD_LABELS: dict[str, str] = {
     "mood": "Stimmung",
 }
 
+# Only these 2 short customer-facing "no prior snapshot yet" reasons are
+# localized (per explicit task scope) — the rest of this module's generated
+# sentences stay German-only for now.
+_NO_PRIOR_COMPARISON_TEXT = {
+    "de": "Noch keine frühere Aufzeichnung vorhanden, um einen Vergleich zu zeigen.",
+    "en": "No earlier record yet to show a comparison.",
+}
+_NO_PRIOR_BASELINE_TEXT = {
+    "de": "Noch keine frühere Aufzeichnung vorhanden.",
+    "en": "No earlier record yet.",
+}
+
 
 @dataclass(frozen=True)
 class LongitudinalComparison:
@@ -89,13 +101,14 @@ def compare_snapshots(
     *,
     older_created_at: str | None = None,
     newer_created_at: str | None = None,
+    locale: str = "de",
 ) -> LongitudinalComparison:
     """Step 7: the customer-facing longitudinal comparison. Only ever
     describes real, already-detected changes — never invents a comparison
     when no earlier snapshot exists."""
     if older_state is None:
         return LongitudinalComparison(
-            available=False, reason="Noch keine frühere Aufzeichnung vorhanden, um einen Vergleich zu zeigen.",
+            available=False, reason=_NO_PRIOR_COMPARISON_TEXT.get(locale, _NO_PRIOR_COMPARISON_TEXT["de"]),
             compared_from=None, compared_to=newer_created_at,
         )
     changes = detect_meaningful_changes(older_state, newer_state)
@@ -107,7 +120,7 @@ def compare_snapshots(
 
 
 def compare_behavioral_baseline(
-    older_state: dict[str, object] | None, newer_state: dict[str, object]
+    older_state: dict[str, object] | None, newer_state: dict[str, object], *, locale: str = "de"
 ) -> dict[str, object]:
     """Step 8: the deterministic historical-comparison FOUNDATION only —
     compares the same behavioral trend averages each snapshot already
@@ -115,7 +128,7 @@ def compare_behavioral_baseline(
     itself stays untouched, this only lets two ALREADY-COMPUTED snapshot
     trend values be compared over a longer horizon)."""
     if older_state is None:
-        return {"available": False, "reason": "Noch keine frühere Aufzeichnung vorhanden.", "fields": {}}
+        return {"available": False, "reason": _NO_PRIOR_BASELINE_TEXT.get(locale, _NO_PRIOR_BASELINE_TEXT["de"]), "fields": {}}
 
     older_domain = (older_state.get("domains") or {}).get("behavioral_wellness") or {}
     newer_domain = (newer_state.get("domains") or {}).get("behavioral_wellness") or {}

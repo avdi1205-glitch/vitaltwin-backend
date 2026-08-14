@@ -31,6 +31,7 @@ from pydantic import BaseModel, field_validator
 from ..core.audit import record_audit_event
 from ..core.auth import require_email as _require_email_dependency
 from ..core.concurrency import run_parallel
+from ..core.locale import resolve_locale
 from ..core.supabase import supabase
 from ..services.privacy_export import resolve_current_consents, rows_to_csv
 
@@ -107,12 +108,13 @@ def _load_category_rows(email: str, category: str) -> list[dict[str, object]]:
 
 
 @router.get("/overview")
-async def privacy_overview(authorization: str | None = Header(default=None)):
+async def privacy_overview(authorization: str | None = Header(default=None), locale: str | None = None):
     """Etappe 9 §7: verständliche Übersicht, welche Daten gespeichert sind,
     welche der Twin aktiv verwendet, und welche Einwilligungen aktiv sind —
     alles aus bereits vorhandenen, per `email` skopierten Abfragen, keine
     neue Geschäftslogik."""
     email = _require_email(authorization)
+    resolved_locale = resolve_locale(locale)
 
     categories = list(CATEGORY_TABLES)
 
@@ -146,10 +148,16 @@ async def privacy_overview(authorization: str | None = Header(default=None)):
         "active_memories_count": len(active_memories),
         "active_patterns_count": len(active_patterns),
         "consents": consents,
-        "note": (
-            "Der Twin verwendet für Empfehlungen und den Chat ausschließlich aktive/bestätigte Memories und "
-            "nicht widersprüchliche Muster — siehe docs/TWIN_CONTEXT.md."
-        ),
+        "note": {
+            "de": (
+                "Der Twin verwendet für Empfehlungen und den Chat ausschließlich aktive/bestätigte Memories und "
+                "nicht widersprüchliche Muster — siehe docs/TWIN_CONTEXT.md."
+            ),
+            "en": (
+                "For recommendations and chat, the twin only ever uses active/confirmed memories and "
+                "non-contradicting patterns — see docs/TWIN_CONTEXT.md."
+            ),
+        }[resolved_locale],
     }
 
 
