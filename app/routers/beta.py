@@ -45,6 +45,24 @@ def _db_has_application(email: str) -> bool:
         return False
 
 
+def _db_application_status(email: str) -> str | None:
+    """Public, honest status lookup for the customer-facing application page
+    (migration 039's `status` column) — never invents a status for an
+    email that never applied."""
+    try:
+        response = (
+            supabase.table(APPLICATION_TABLE)
+            .select("status")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return str(rows[0]["status"]) if rows else None
+    except Exception:
+        return None
+
+
 @router.post("/apply")
 async def apply_for_beta(req: BetaApplicationRequest, request: Request):
     enforce_rate_limit(request, "beta_apply", max_requests=5, window_seconds=60)
@@ -75,6 +93,7 @@ async def apply_for_beta(req: BetaApplicationRequest, request: Request):
         return {
             "message": "Du hast dich bereits beworben. Wir melden uns, sobald dein Platz bestätigt ist.",
             "already_applied": True,
+            "status": _db_application_status(email),
         }
 
     saved = _db_store_application(
@@ -96,4 +115,20 @@ async def apply_for_beta(req: BetaApplicationRequest, request: Request):
     return {
         "message": "Danke für deine Bewerbung! Wir melden uns per E-Mail, sobald dein Platz in der Beta-Kohorte bestätigt ist.",
         "already_applied": False,
+        "status": "pending",
     }
+
+
+@router.get("/status")
+async def beta_application_status(email: str, request: Request):
+    """Public, honest status check for the customer-facing application page
+    — lets an applicant come back later (without logging in) and see
+    pending/approved/rejected instead of re-applying. Never reveals whether
+    ANY OTHER email applied — only ever returns state for the exact email
+    the caller already knows and provides themselves."""
+    enforce_rate_limit(request, "beta_status", max_requests=20, window_seconds=60)
+    normalized_email = email.strip().lower()
+    if not _EMAIL_RE.match(normalized_email):
+        raise HTTPException(status_code=400, detail="Bitte gib eine gültige E-Mail-Adresse ein")
+    status = _db_application_status(normalized_email)
+    return {"applied": status is not None, "status": status}

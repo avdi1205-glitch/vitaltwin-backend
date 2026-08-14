@@ -1430,10 +1430,9 @@ async def list_beta_applications(
 ):
     """Previously only a total COUNT was shown on the dashboard
     (`beta_applications_total`) — admins had no way to see WHO applied or
-    read their motivation, only a raw DB query could. Read-only: there is
-    no separate approval/activation status column for beta testers (see
-    `beta_applications_note` on `/dashboard`), so this deliberately does not
-    fabricate an approve/reject workflow that doesn't exist."""
+    read their motivation. Now includes each application's real `status`
+    (pending/approved/rejected, migration 039) so the founder can act via
+    the `approve`/`reject` endpoints below — no separate/fabricated status."""
     require_admin_permission(authorization, "view_support")
     start, end = _paginate(page, page_size)
     try:
@@ -1454,8 +1453,127 @@ async def list_beta_applications(
         "page": page,
         "page_size": page_size,
         "total": total,
-        "note": "Aktuell keine separate Freigabe-/Aktivierungsstatus-Spalte — Beta-Zugang wird manuell per Premium-Flag vergeben.",
     }
+
+
+BETA_TESTER_GRANT_PLAN = "pro"
+BETA_TESTER_GRANT_DAYS = 90
+
+
+@router.post("/support/beta-applications/{application_id}/approve")
+async def approve_beta_application(application_id: int, authorization: str | None = Header(default=None)):
+    """One-click 'Beta freigeben': approves a PENDING application and grants
+    exactly 90 days of Pro via the EXISTING Beta Tester Program overlay
+    (`grant_beta_by_email`) — never a second entitlement mechanism, never a
+    Stripe subscription/charge. Reuses the same `manage_premium` permission
+    as the existing manual beta grant endpoints (no new permission).
+    A real paid Pro/Family user is automatically protected from any
+    downgrade — `grant_beta_by_email` never touches the real plan, and
+    `get_effective_plan_by_email` always returns whichever of real-plan/
+    beta-grant ranks higher."""
+    admin = require_admin_permission(authorization, "manage_premium")
+
+    try:
+        rows = (
+            supabase.table(BETA_APPLICATION_TABLE)
+            .select("id,email,status")
+            .eq("id", application_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Bewerbung konnte nicht geladen werden.") from exc
+    if not rows:
+        raise HTTPException(status_code=404, detail="Bewerbung nicht gefunden.")
+    application = rows[0]
+    if application.get("status") != "pending":
+        raise HTTPException(status_code=409, detail="Diese Bewerbung wurde bereits bearbeitet.")
+
+    email = str(application["email"]).strip().lower()
+    try:
+        user_exists = bool(supabase.table(USER_TABLE).select("email").eq("email", email).limit(1).execute().data)
+    except Exception:
+        user_exists = False
+    if not user_exists:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Für diese Bewerbung existiert noch kein VitalTwin-Konto mit dieser E-Mail-Adresse. "
+                "Bitte den Bewerber bitten, sich zuerst mit dieser E-Mail-Adresse zu registrieren — "
+                "danach kann die Freigabe hier erneut ausgeführt werden."
+            ),
+        )
+
+    updated = grant_beta_by_email(email, BETA_TESTER_GRANT_PLAN, BETA_TESTER_GRANT_DAYS, granted_by=admin.email)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Beta-Zugang konnte nicht gewährt werden.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        supabase.table(BETA_APPLICATION_TABLE).update(
+            {"status": "approved", "reviewed_at": now_iso, "reviewed_by": admin.email}
+        ).eq("id", application_id).execute()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Beta-Zugang wurde gewährt, der Bewerbungsstatus konnte aber nicht aktualisiert werden.",
+        ) from exc
+
+    grant = get_beta_grant_by_email(email)
+    record_audit_event(
+        user_id=None,
+        email=admin.email,
+        action="update",
+        entity_type="beta_application",
+        entity_id=str(application_id),
+        metadata={
+            "status": "approved",
+            "granted_email": email,
+            "beta_plan": BETA_TESTER_GRANT_PLAN,
+            "days": BETA_TESTER_GRANT_DAYS,
+        },
+    )
+    return {"message": "Beta-Zugang freigegeben.", "application_id": application_id, "email": email, "beta_grant": grant}
+
+
+@router.post("/support/beta-applications/{application_id}/reject")
+async def reject_beta_application(application_id: int, authorization: str | None = Header(default=None)):
+    """Marks a PENDING application as rejected — grants no entitlement at
+    all, never touches `vt_users`."""
+    admin = require_admin_permission(authorization, "manage_premium")
+
+    try:
+        rows = (
+            supabase.table(BETA_APPLICATION_TABLE)
+            .select("id,status")
+            .eq("id", application_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Bewerbung konnte nicht geladen werden.") from exc
+    if not rows:
+        raise HTTPException(status_code=404, detail="Bewerbung nicht gefunden.")
+    if rows[0].get("status") != "pending":
+        raise HTTPException(status_code=409, detail="Diese Bewerbung wurde bereits bearbeitet.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        supabase.table(BETA_APPLICATION_TABLE).update(
+            {"status": "rejected", "reviewed_at": now_iso, "reviewed_by": admin.email}
+        ).eq("id", application_id).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Status konnte nicht aktualisiert werden.") from exc
+
+    record_audit_event(
+        user_id=None, email=admin.email, action="update", entity_type="beta_application", entity_id=str(application_id),
+        metadata={"status": "rejected"},
+    )
+    return {"message": "Bewerbung abgelehnt.", "application_id": application_id}
 
 
 # ---------------------------------------------------------------------------

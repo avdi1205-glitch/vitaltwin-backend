@@ -1088,15 +1088,15 @@ class TestSupportContactsAndBetaApplications:
             ContactStatusInput(status="unbekannt")
 
     @pytest.mark.anyio
-    async def test_list_beta_applications_returns_items_and_honest_note(self, fake_supabase, permission_spy):
+    async def test_list_beta_applications_returns_items_with_status(self, fake_supabase, permission_spy):
         fake_supabase.store["vt_beta_applications"] = {
-            "data": [{"email": "beta@example.com", "full_name": "Beta Tester", "motivation": "Test"}],
+            "data": [{"email": "beta@example.com", "full_name": "Beta Tester", "motivation": "Test", "status": "pending"}],
             "count": 1,
         }
         result = await admin_module.list_beta_applications(authorization="Bearer x")
         assert result["items"][0]["email"] == "beta@example.com"
+        assert result["items"][0]["status"] == "pending"
         assert result["total"] == 1
-        assert "note" in result
 
 
 # ---------------------------------------------------------------------------
