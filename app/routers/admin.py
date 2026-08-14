@@ -55,7 +55,7 @@ from ..core.plan_service import (
 )
 from ..core.rate_limit import enforce_rate_limit
 from ..core import stripe_billing
-from ..core.supabase import supabase
+from ..core.supabase import supabase, supabase_admin
 from ..core.webhook_auth import require_webhook_secret
 from ..services.privacy_export import resolve_current_consents
 from .users import set_premium_by_email
@@ -1434,10 +1434,11 @@ async def list_beta_applications(
     (pending/approved/rejected, migration 039) so the founder can act via
     the `approve`/`reject` endpoints below — no separate/fabricated status."""
     require_admin_permission(authorization, "view_support")
+    admin_client = _require_beta_admin_client()
     start, end = _paginate(page, page_size)
     try:
         response = (
-            supabase.table(BETA_APPLICATION_TABLE)
+            admin_client.table(BETA_APPLICATION_TABLE)
             .select("*", count="exact")
             .order("created_at", desc=True)
             .range(start, end)
@@ -1460,6 +1461,16 @@ BETA_TESTER_GRANT_PLAN = "pro"
 BETA_TESTER_GRANT_DAYS = 90
 
 
+def _require_beta_admin_client():
+    """`vt_beta_applications` has RLS enabled with zero anon policies
+    (migration 040) — only the privileged server client may touch it.
+    Fails closed (503) if `SUPABASE_SERVICE_ROLE_KEY` isn't configured yet,
+    rather than silently falling back to the anon client."""
+    if supabase_admin is None:
+        raise HTTPException(status_code=503, detail="Beta-Bewerbungssystem ist aktuell nicht vollständig konfiguriert.")
+    return supabase_admin
+
+
 @router.post("/support/beta-applications/{application_id}/approve")
 async def approve_beta_application(application_id: int, authorization: str | None = Header(default=None)):
     """One-click 'Beta freigeben': approves a PENDING application and grants
@@ -1472,10 +1483,11 @@ async def approve_beta_application(application_id: int, authorization: str | Non
     `get_effective_plan_by_email` always returns whichever of real-plan/
     beta-grant ranks higher."""
     admin = require_admin_permission(authorization, "manage_premium")
+    admin_client = _require_beta_admin_client()
 
     try:
         rows = (
-            supabase.table(BETA_APPLICATION_TABLE)
+            admin_client.table(BETA_APPLICATION_TABLE)
             .select("id,email,status")
             .eq("id", application_id)
             .limit(1)
@@ -1483,6 +1495,8 @@ async def approve_beta_application(application_id: int, authorization: str | Non
             .data
             or []
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Bewerbung konnte nicht geladen werden.") from exc
     if not rows:
@@ -1512,7 +1526,7 @@ async def approve_beta_application(application_id: int, authorization: str | Non
 
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        supabase.table(BETA_APPLICATION_TABLE).update(
+        admin_client.table(BETA_APPLICATION_TABLE).update(
             {"status": "approved", "reviewed_at": now_iso, "reviewed_by": admin.email}
         ).eq("id", application_id).execute()
     except Exception as exc:
@@ -1543,10 +1557,11 @@ async def reject_beta_application(application_id: int, authorization: str | None
     """Marks a PENDING application as rejected — grants no entitlement at
     all, never touches `vt_users`."""
     admin = require_admin_permission(authorization, "manage_premium")
+    admin_client = _require_beta_admin_client()
 
     try:
         rows = (
-            supabase.table(BETA_APPLICATION_TABLE)
+            admin_client.table(BETA_APPLICATION_TABLE)
             .select("id,status")
             .eq("id", application_id)
             .limit(1)
@@ -1554,6 +1569,8 @@ async def reject_beta_application(application_id: int, authorization: str | None
             .data
             or []
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Bewerbung konnte nicht geladen werden.") from exc
     if not rows:
@@ -1563,7 +1580,7 @@ async def reject_beta_application(application_id: int, authorization: str | None
 
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        supabase.table(BETA_APPLICATION_TABLE).update(
+        admin_client.table(BETA_APPLICATION_TABLE).update(
             {"status": "rejected", "reviewed_at": now_iso, "reviewed_by": admin.email}
         ).eq("id", application_id).execute()
     except Exception as exc:

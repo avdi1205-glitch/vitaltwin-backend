@@ -84,6 +84,7 @@ class TestApproveBetaApplication:
             user_rows=[{"email": "user@example.com"}],
         )
         monkeypatch.setattr(admin_module, "supabase", fake)
+        monkeypatch.setattr(admin_module, "supabase_admin", fake)
         monkeypatch.setattr(admin_module, "grant_beta_by_email", lambda *a, **k: True)
         monkeypatch.setattr(admin_module, "get_beta_grant_by_email", lambda email: {"plan": "pro", "active": True})
 
@@ -99,6 +100,7 @@ class TestApproveBetaApplication:
             user_rows=[{"email": "user@example.com"}],
         )
         monkeypatch.setattr(admin_module, "supabase", fake)
+        monkeypatch.setattr(admin_module, "supabase_admin", fake)
 
         grant_calls = []
         monkeypatch.setattr(
@@ -120,6 +122,7 @@ class TestApproveBetaApplication:
     async def test_404_when_application_not_found(self, monkeypatch, permission_spy):
         fake = _FakeSupabase(application_rows=[], user_rows=[{"email": "user@example.com"}])
         monkeypatch.setattr(admin_module, "supabase", fake)
+        monkeypatch.setattr(admin_module, "supabase_admin", fake)
 
         with pytest.raises(HTTPException) as exc:
             await admin_module.approve_beta_application(999, authorization="Bearer x")
@@ -131,6 +134,7 @@ class TestApproveBetaApplication:
             user_rows=[{"email": "user@example.com"}],
         )
         monkeypatch.setattr(admin_module, "supabase", fake)
+        monkeypatch.setattr(admin_module, "supabase_admin", fake)
 
         with pytest.raises(HTTPException) as exc:
             await admin_module.approve_beta_application(1, authorization="Bearer x")
@@ -142,6 +146,7 @@ class TestApproveBetaApplication:
             user_rows=[],
         )
         monkeypatch.setattr(admin_module, "supabase", fake)
+        monkeypatch.setattr(admin_module, "supabase_admin", fake)
         grant_calls = []
         monkeypatch.setattr(admin_module, "grant_beta_by_email", lambda *a, **k: grant_calls.append(a) or True)
 
@@ -159,6 +164,7 @@ class TestRejectBetaApplication:
     ):
         fake = _FakeSupabase(application_rows=[{"id": 2, "status": "pending"}])
         monkeypatch.setattr(admin_module, "supabase", fake)
+        monkeypatch.setattr(admin_module, "supabase_admin", fake)
 
         result = await admin_module.reject_beta_application(2, authorization="Bearer x")
 
@@ -169,6 +175,7 @@ class TestRejectBetaApplication:
     async def test_409_when_already_reviewed(self, monkeypatch, permission_spy):
         fake = _FakeSupabase(application_rows=[{"id": 2, "status": "rejected"}])
         monkeypatch.setattr(admin_module, "supabase", fake)
+        monkeypatch.setattr(admin_module, "supabase_admin", fake)
 
         with pytest.raises(HTTPException) as exc:
             await admin_module.reject_beta_application(2, authorization="Bearer x")
@@ -177,10 +184,32 @@ class TestRejectBetaApplication:
     async def test_404_when_not_found(self, monkeypatch, permission_spy):
         fake = _FakeSupabase(application_rows=[])
         monkeypatch.setattr(admin_module, "supabase", fake)
+        monkeypatch.setattr(admin_module, "supabase_admin", fake)
 
         with pytest.raises(HTTPException) as exc:
             await admin_module.reject_beta_application(999, authorization="Bearer x")
         assert exc.value.status_code == 404
+
+
+@pytest.mark.anyio
+class TestPrivilegedClientFailsClosed:
+    async def test_approve_returns_503_without_service_role_key(self, monkeypatch, permission_spy):
+        monkeypatch.setattr(admin_module, "supabase_admin", None)
+        with pytest.raises(HTTPException) as exc:
+            await admin_module.approve_beta_application(1, authorization="Bearer x")
+        assert exc.value.status_code == 503
+
+    async def test_reject_returns_503_without_service_role_key(self, monkeypatch, permission_spy):
+        monkeypatch.setattr(admin_module, "supabase_admin", None)
+        with pytest.raises(HTTPException) as exc:
+            await admin_module.reject_beta_application(1, authorization="Bearer x")
+        assert exc.value.status_code == 503
+
+    async def test_list_returns_empty_without_service_role_key(self, monkeypatch, permission_spy):
+        monkeypatch.setattr(admin_module, "supabase_admin", None)
+        with pytest.raises(HTTPException) as exc:
+            await admin_module.list_beta_applications(authorization="Bearer x")
+        assert exc.value.status_code == 503
 
 
 @pytest.fixture

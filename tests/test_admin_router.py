@@ -259,7 +259,8 @@ class TestPermissionRequirements:
         assert permission_spy[-1] == ("Bearer x", "manage_support")
 
     @pytest.mark.anyio
-    async def test_list_beta_applications_requires_view_support(self, fake_supabase, permission_spy):
+    async def test_list_beta_applications_requires_view_support(self, fake_supabase, permission_spy, monkeypatch):
+        monkeypatch.setattr(admin_module, "supabase_admin", fake_supabase)
         await admin_module.list_beta_applications(authorization="Bearer x")
         assert permission_spy[-1] == ("Bearer x", "view_support")
 
@@ -1088,11 +1089,12 @@ class TestSupportContactsAndBetaApplications:
             ContactStatusInput(status="unbekannt")
 
     @pytest.mark.anyio
-    async def test_list_beta_applications_returns_items_with_status(self, fake_supabase, permission_spy):
+    async def test_list_beta_applications_returns_items_with_status(self, fake_supabase, permission_spy, monkeypatch):
         fake_supabase.store["vt_beta_applications"] = {
             "data": [{"email": "beta@example.com", "full_name": "Beta Tester", "motivation": "Test", "status": "pending"}],
             "count": 1,
         }
+        monkeypatch.setattr(admin_module, "supabase_admin", fake_supabase)
         result = await admin_module.list_beta_applications(authorization="Bearer x")
         assert result["items"][0]["email"] == "beta@example.com"
         assert result["items"][0]["status"] == "pending"
