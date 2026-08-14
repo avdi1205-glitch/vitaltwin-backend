@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
+from ..core.locale import resolve_locale
 from ..core.supabase import supabase
 from .users import get_email_by_token, is_premium_by_email
 
@@ -400,6 +401,119 @@ class TwinInput(BaseModel):
     token: str | None = None
 
 
+# Faithful EN translations of the German recommendation/fallback strings above (same
+# meaning, wellness-only, no stronger claims). Any recommendation text not found here
+# (e.g. a custom recommendation configured directly in vt_marker_reference) is kept in
+# German — an honest fallback rather than a fabricated translation.
+_RECOMMENDATION_TRANSLATIONS_EN: dict[str, str] = {
+    "HbA1c optimieren: Fokus auf stabile Blutzuckerwerte durch regelmäßige Mahlzeitenrhythmen.":
+        "Optimize HbA1c: focus on stable blood sugar through regular meal timing.",
+    "Kohlenhydratqualität verbessern: mehr Ballaststoffe, weniger stark verarbeitete Produkte.":
+        "Improve carbohydrate quality: more fiber, fewer heavily processed foods.",
+    "Entzündungsmanagement verbessern: Ernährung, Schlaf und Stress im Blick behalten.":
+        "Improve inflammation management: keep an eye on nutrition, sleep and stress.",
+    "Regelmäßige moderate Bewegung kann helfen, niedriggradige Entzündungswerte zu senken.":
+        "Regular moderate exercise can help lower low-grade inflammation markers.",
+    "Vitamin-D-Status regelmäßig kontrollieren und optimieren.":
+        "Check and optimize your vitamin D status regularly.",
+    "Zeit im Freien und Sonnenlichtexposition im Alltag einplanen, soweit möglich.":
+        "Plan time outdoors and sunlight exposure into your day where possible.",
+    "ApoB senken durch Lebensstil und ärztlich begleitete Strategie.":
+        "Lower ApoB through lifestyle changes and a medically supervised strategy.",
+    "Gesättigte Fette reduzieren, Ballaststoffe und ungesättigte Fette erhöhen.":
+        "Reduce saturated fats, increase fiber and unsaturated fats.",
+    "Nüchternglukose im Blick behalten: regelmäßige Bewegung nach den Mahlzeiten hilft.":
+        "Keep an eye on fasting glucose: regular movement after meals helps.",
+    "Zuckerhaltige Getränke und schnelle Kohlenhydrate reduzieren.":
+        "Reduce sugary drinks and fast-digesting carbohydrates.",
+    "HDL-Cholesterin unterstützen: regelmäßige Ausdauerbewegung ist gut untersucht.":
+        "Support HDL cholesterol: regular endurance exercise is well studied.",
+    "Ungesättigte Fette (z. B. Olivenöl, Nüsse, Fisch) bevorzugen.":
+        "Favor unsaturated fats (e.g. olive oil, nuts, fish).",
+    "Triglyceride senken: Alkohol und zugesetzten Zucker reduzieren.":
+        "Lower triglycerides: reduce alcohol and added sugar.",
+    "Omega-3-reiche Lebensmittel wie fetten Fisch regelmäßig einplanen.":
+        "Regularly include omega-3-rich foods such as fatty fish.",
+    "B-Vitamin-reiche Ernährung (Blattgemüse, Vollkorn, Hülsenfrüchte) im Blick behalten.":
+        "Keep an eye on a B-vitamin-rich diet (leafy greens, whole grains, legumes).",
+    "Bei dauerhaft erhöhten Werten ärztliche Abklärung der Ursache empfehlenswert.":
+        "If levels stay persistently elevated, medical evaluation of the cause is advisable.",
+    "TSH-Wert bei Auffälligkeiten ärztlich einordnen lassen, nicht selbst behandeln.":
+        "Have an abnormal TSH value assessed by a doctor rather than self-treating.",
+    "Regelmäßiger Schlaf-Wach-Rhythmus unterstützt die hormonelle Balance allgemein.":
+        "A regular sleep-wake rhythm generally supports hormonal balance.",
+    "Eisenreiche und eisenhemmende/-fördernde Lebensmittelkombinationen beachten.":
+        "Pay attention to iron-rich and iron-inhibiting/-supporting food combinations.",
+    "Bei stark abweichenden Werten ärztliche Ursachenklärung statt Selbstsupplementierung.":
+        "For strongly deviating values, seek medical evaluation of the cause instead of self-supplementing.",
+    "B12-Quellen (bei veganer/vegetarischer Ernährung besonders beachten) regelmäßig einplanen.":
+        "Regularly plan B12 sources (especially important with a vegan/vegetarian diet).",
+    "Bei dauerhaft niedrigen Werten ärztliche Abklärung empfehlenswert.":
+        "If levels stay persistently low, medical evaluation is advisable.",
+    "Fetten Fisch (Lachs, Makrele, Hering) 2x pro Woche einplanen oder Omega-3-Quelle prüfen.":
+        "Plan fatty fish (salmon, mackerel, herring) twice a week, or check your omega-3 source.",
+    "Verhältnis von Omega-6 zu Omega-3 in der Ernährung im Blick behalten.":
+        "Keep an eye on the ratio of omega-6 to omega-3 in your diet.",
+    "Regelmäßiges Ausdauertraining senkt den Ruhepuls bei vielen Menschen nachweislich.":
+        "Regular endurance training has been shown to lower resting heart rate for many people.",
+    "Schlafqualität und Erholung beeinflussen den Ruhepuls spürbar.":
+        "Sleep quality and recovery noticeably affect resting heart rate.",
+    "Salzarme, kaliumreiche Ernährung kann den Blutdruck unterstützen.":
+        "A low-salt, potassium-rich diet can support blood pressure.",
+    "Regelmäßige Bewegung und Stressreduktion sind gut belegte Blutdruck-Hebel.":
+        "Regular exercise and stress reduction are well-documented blood pressure levers.",
+    "Regelmäßige Blutdruckmessung zu ähnlichen Tageszeiten für bessere Vergleichbarkeit.":
+        "Measure blood pressure regularly at similar times of day for better comparability.",
+    "Alkoholkonsum reduzieren kann den diastolischen Wert positiv beeinflussen.":
+        "Reducing alcohol intake can positively affect the diastolic value.",
+    "Taillenumfang regelmäßig zur gleichen Tageszeit messen für Vergleichbarkeit.":
+        "Measure waist circumference regularly at the same time of day for comparability.",
+    "Kombination aus Ernährungsanpassung und Krafttraining wirkt oft am nachhaltigsten.":
+        "A combination of dietary changes and strength training often works best long-term.",
+    "Feste Schlafenszeiten und Bildschirmpause vor dem Schlafengehen einplanen.":
+        "Plan fixed bedtimes and a screen break before sleeping.",
+    "Schlafzimmer kühl, dunkel und ruhig halten für bessere Schlafqualität.":
+        "Keep the bedroom cool, dark and quiet for better sleep quality.",
+    "Regelmäßiges Krafttraining, insbesondere Grifftraining, kann die Griffkraft verbessern.":
+        "Regular strength training, especially grip training, can improve grip strength.",
+    "Griffkraft gilt in Studien als Indikator für allgemeine Muskelkraft und Vitalität.":
+        "Studies consider grip strength an indicator of overall muscle strength and vitality.",
+    "Marker optimieren.": "Optimize marker.",
+    "Marker sind stabil. Werte regelmäßig weiter tracken.": "Markers are stable. Keep tracking your values regularly.",
+}
+
+_STARTER_RECOMMENDATIONS: dict[str, list[str]] = {
+    "de": [
+        "Achte auf Schlaf, Stressmanagement und regelmäßige Bewegung.",
+        "Kontrolliere deine Marker regelmäßig für bessere Vergleichbarkeit.",
+        "Für personalisierte Szenarien und Verlauf aktiviere den Beta-Zugang.",
+    ],
+    "en": [
+        "Focus on sleep, stress management and regular movement.",
+        "Check your markers regularly for better comparability.",
+        "Activate beta access for personalized scenarios and history.",
+    ],
+}
+
+_METHODIK_TYP: dict[str, str] = {"de": "Wellness-Orientierung", "en": "Wellness orientation"}
+_METHODIK_HINWEIS_PREMIUM: dict[str, str] = {
+    "de": "Kein medizinisches Produkt. Keine Diagnose oder Therapieempfehlung.",
+    "en": "Not a medical product. No diagnosis or treatment recommendation.",
+}
+_METHODIK_HINWEIS_STARTER: dict[str, str] = {
+    "de": "Starter-Modus: Basis-Auswertung. Für vollständige Simulationen und Detailquellen aktiviere den Beta-Zugang.",
+    "en": "Starter mode: basic evaluation. Activate beta access for full simulations and detailed sources.",
+}
+_FAMILY_CONTEXT_HINWEIS: dict[str, str] = {
+    "de": "Deine Empfehlungen wurden auf Basis deines Familienkontexts priorisiert (Wellness-Orientierung, keine Diagnose).",
+    "en": "Your recommendations were prioritized based on your family context (wellness orientation only, not a diagnosis).",
+}
+_STARTER_LIMIT_ERROR: dict[str, str] = {
+    "de": "Starter enthält eine einmalige Twin-Berechnung. Aktiviere den Beta-Zugang für unbegrenzte Simulationen.",
+    "en": "Starter includes one single twin calculation. Activate beta access for unlimited simulations.",
+}
+
+
 # Wellness-only personalization: which existing marker recommendations to prioritize
 # based on an optional, self-reported family context. This never changes the
 # biological-age calculation itself and adds no new health claims or risk scoring.
@@ -478,6 +592,7 @@ def _build_recommendations(
     marker_breakdown: list[dict[str, Any]],
     config: dict[str, dict[str, Any]],
     family_context: list[str] | None = None,
+    locale: str = "de",
 ) -> list[str]:
     focus_markers: set[str] = set()
     for context_item in family_context or []:
@@ -496,12 +611,18 @@ def _build_recommendations(
         marker = item["marker"]
         tips = config.get(marker, {}).get("recommendations") or ["Marker optimieren."]
         for tip in tips[:2]:
-            recommendations.append(str(tip))
+            text = str(tip)
+            if locale == "en":
+                text = _RECOMMENDATION_TRANSLATIONS_EN.get(text, text)
+            recommendations.append(text)
         if len(recommendations) >= 6:
             break
 
     if not recommendations:
-        recommendations.append("Marker sind stabil. Werte regelmäßig weiter tracken.")
+        fallback = "Marker sind stabil. Werte regelmäßig weiter tracken."
+        if locale == "en":
+            fallback = _RECOMMENDATION_TRANSLATIONS_EN.get(fallback, fallback)
+        recommendations.append(fallback)
 
     return recommendations[:6]
 
@@ -573,7 +694,8 @@ def _has_existing_calculation(email: str) -> bool:
         return False
 
 @router.post("/calculate")
-async def calculate(data: TwinInput):
+async def calculate(data: TwinInput, locale: str | None = None):
+    resolved_locale = resolve_locale(locale)
     marker_config = _load_marker_config()
     values = {
         "hba1c": data.hba1c,
@@ -608,7 +730,7 @@ async def calculate(data: TwinInput):
         )
 
     bio_age = float(data.age) + sum(item["contribution"] for item in marker_breakdown)
-    recommendations = _build_recommendations(marker_breakdown, marker_config, data.family_context)
+    recommendations = _build_recommendations(marker_breakdown, marker_config, data.family_context, resolved_locale)
 
     email = get_email_by_token(data.token)
     is_premium = bool(email) and is_premium_by_email(email)
@@ -616,14 +738,10 @@ async def calculate(data: TwinInput):
     if email and not is_premium and _has_existing_calculation(email):
         raise HTTPException(
             status_code=403,
-            detail="Starter enthält eine einmalige Twin-Berechnung. Aktiviere den Beta-Zugang für unbegrenzte Simulationen.",
+            detail=_STARTER_LIMIT_ERROR[resolved_locale],
         )
 
-    starter_recommendations = [
-        "Achte auf Schlaf, Stressmanagement und regelmäßige Bewegung.",
-        "Kontrolliere deine Marker regelmäßig für bessere Vergleichbarkeit.",
-        "Für personalisierte Szenarien und Verlauf aktiviere den Beta-Zugang.",
-    ]
+    starter_recommendations = _STARTER_RECOMMENDATIONS[resolved_locale]
 
     result = {
         "biologisches_alter": round(bio_age, 1),
@@ -634,18 +752,18 @@ async def calculate(data: TwinInput):
             "aggressiv": round(bio_age - 9.0, 1) if is_premium else round(bio_age, 1),
         },
         "methodik": {
-            "typ": "Wellness-Orientierung",
+            "typ": _METHODIK_TYP[resolved_locale],
             "hinweis": (
-                "Kein medizinisches Produkt. Keine Diagnose oder Therapieempfehlung."
+                _METHODIK_HINWEIS_PREMIUM[resolved_locale]
                 if is_premium
-                else "Starter-Modus: Basis-Auswertung. Für vollständige Simulationen und Detailquellen aktiviere den Beta-Zugang."
+                else _METHODIK_HINWEIS_STARTER[resolved_locale]
             ),
         },
         "marker_references": _build_marker_references(marker_config) if is_premium else [],
         "empfehlungen": recommendations if is_premium else starter_recommendations,
         "marker_breakdown": marker_breakdown,
         "familienkontext_hinweis": (
-            "Deine Empfehlungen wurden auf Basis deines Familienkontexts priorisiert (Wellness-Orientierung, keine Diagnose)."
+            _FAMILY_CONTEXT_HINWEIS[resolved_locale]
             if is_premium and data.family_context
             else None
         ),
