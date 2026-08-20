@@ -85,10 +85,20 @@ class _FakeQuery:
         self._on_conflict = on_conflict
         return self
 
+    def insert(self, payload: dict):
+        self._op = "insert"
+        self._payload = dict(payload)
+        return self
+
     def _matches(self, row: dict) -> bool:
         return all(row.get(field) == value for field, value in self._eq)
 
     def execute(self):
+        if self._op == "insert":
+            row = dict(self._payload or {})
+            row.setdefault("id", next(self._id_counter))
+            self._rows.append(row)
+            return SimpleNamespace(data=[row])
         if self._op == "upsert":
             conflict_fields = (self._on_conflict or "").split(",")
             existing = None
@@ -198,6 +208,102 @@ class TestHealthConnectSyncEndpoint:
         )
         assert resp.status_code == 200
         assert resp.json()["results"]["steps"] == {"received": 1, "stored": 0, "skipped": 1}
+
+
+# ---------------------------------------------------------------------------
+# health_sync_runs logging (Phase 2.3 background sync)
+# ---------------------------------------------------------------------------
+
+
+class TestHealthConnectSyncRunLogging:
+    def test_manual_sync_defaults_and_logs_a_completed_run(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {"steps": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z"}]}},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        runs = fake_supabase.tables["health_sync_runs"]
+        assert len(runs) == 1
+        assert runs[0]["provider"] == "health_connect"
+        assert runs[0]["connection_id"] is None
+        assert runs[0]["sync_type"] == "manual"
+        assert runs[0]["status"] == "completed"
+        assert runs[0]["records_received"] == 1
+        assert runs[0]["records_created"] == 1
+        assert runs[0]["records_skipped"] == 0
+        assert runs[0]["user_id"] == 42
+
+    def test_background_sync_type_is_accepted_and_logged(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={
+                "records": {"steps": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z"}]},
+                "sync_type": "background",
+            },
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        runs = fake_supabase.tables["health_sync_runs"]
+        assert runs[0]["sync_type"] == "background"
+
+    def test_invalid_sync_type_is_rejected(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {}, "sync_type": "scheduled_cron"},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 422
+
+    def test_partial_status_when_some_records_skipped(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={
+                "records": {
+                    "steps": [
+                        {"id": "good", "count": 500, "startTime": "2026-08-13T08:00:00Z"},
+                        {"id": "bad", "count": 1, "startTime": ""},
+                    ]
+                }
+            },
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        runs = fake_supabase.tables["health_sync_runs"]
+        assert runs[0]["status"] == "partial"
+        assert runs[0]["records_created"] == 1
+        assert runs[0]["records_skipped"] == 1
+
+    def test_no_run_logged_when_no_records_and_nothing_unsupported(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {}},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        assert fake_supabase.tables.get("health_sync_runs", []) == []
+
+    def test_logging_failure_does_not_break_the_sync_response(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+
+        def _boom(name):
+            if name == "health_sync_runs":
+                raise RuntimeError("db unavailable")
+            return _FakeQuery(fake_supabase.tables.setdefault(name, []), fake_supabase._id_counter)
+
+        monkeypatch.setattr(fake_supabase, "table", _boom)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {"steps": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z"}]}},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["results"]["steps"]["stored"] == 1
 
     def test_denied_without_entitlement(self, client, fake_supabase, monkeypatch):
         _auth_as(monkeypatch, user_id=42)

@@ -30,8 +30,10 @@ row this endpoint writes has `connection_id = None`.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ..core.auth import require_user
 from ..core.health_normalization_service import (
@@ -44,6 +46,12 @@ from ..core.plan_service import has_feature
 from ..core.supabase import supabase
 
 router = APIRouter()
+
+# Matches Google Health's own health_sync_service.py::SYNC_RUN_TABLE — same
+# table, now shared by both providers (migration 041 made connection_id
+# nullable specifically so Health Connect rows can use it too).
+SYNC_RUN_TABLE = "health_sync_runs"
+ALLOWED_SYNC_TYPES = ("manual", "background")
 
 
 def _require_user_id(authorization: str | None) -> int:
@@ -65,15 +73,30 @@ class HealthConnectSyncRequest(BaseModel):
     # data_type -> list of raw plugin records (shape varies per data type,
     # normalize_health_connect_record() validates/extracts defensively).
     records: dict[str, list[dict[str, object]]] = {}
+    # "manual" (button, HealthConnectSync.tsx) or "background" (WorkManager,
+    # HealthConnectSyncWorker.kt, Phase 2.3) — purely descriptive, stored in
+    # health_sync_runs.sync_type, never affects what gets synced.
+    sync_type: str = "manual"
+
+    @field_validator("sync_type")
+    @classmethod
+    def _validate_sync_type(cls, value: str) -> str:
+        if value not in ALLOWED_SYNC_TYPES:
+            raise ValueError(f"sync_type must be one of {ALLOWED_SYNC_TYPES}")
+        return value
 
 
 @router.post("/health-connect/sync")
 async def health_connect_sync(body: HealthConnectSyncRequest, authorization: str | None = Header(default=None)):
     user_id = _require_user_id(authorization)
+    started_at = datetime.now(timezone.utc)
 
     results: dict[str, dict[str, int]] = {}
     unsupported_types: list[str] = []
     debug_last_error: str | None = None
+    total_received = 0
+    total_stored = 0
+    total_skipped = 0
 
     for data_type, raw_records in body.records.items():
         if data_type not in HEALTH_CONNECT_TYPES:
@@ -102,5 +125,41 @@ async def health_connect_sync(body: HealthConnectSyncRequest, authorization: str
                     debug_last_error = f"{data_type}: {exc}"[:300]
 
         results[data_type] = {"received": received, "stored": stored, "skipped": skipped}
+        total_received += received
+        total_stored += stored
+        total_skipped += skipped
+
+    # Same table Google Health's health_sync_service.py already writes to
+    # (SYNC_RUN_TABLE) — provider distinguishes the two, connection_id stays
+    # null for Health Connect (no OAuth connection exists for it, see
+    # migration 041). Best-effort: a logging failure must never turn an
+    # otherwise-successful data sync into an error response.
+    if total_received > 0 or unsupported_types:
+        status = "completed"
+        if total_stored == 0 and (total_skipped > 0 or unsupported_types):
+            status = "failed"
+        elif total_skipped > 0:
+            status = "partial"
+        try:
+            supabase.table(SYNC_RUN_TABLE).insert({
+                "user_id": user_id,
+                "connection_id": None,
+                "provider": "health_connect",
+                "sync_type": body.sync_type,
+                "requested_data_types": list(body.records.keys()),
+                "started_at": started_at.isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "status": status,
+                "records_received": total_received,
+                # Matches the existing, documented Google Health limitation
+                # (health_sync_service.py): upsert doesn't distinguish
+                # insert-vs-update, so every stored row counts as "created".
+                "records_created": total_stored,
+                "records_updated": 0,
+                "records_skipped": total_skipped,
+                "error_message": debug_last_error,
+            }).execute()
+        except Exception:
+            pass
 
     return {"results": results, "unsupported_types": unsupported_types, "debug_last_error": debug_last_error}
