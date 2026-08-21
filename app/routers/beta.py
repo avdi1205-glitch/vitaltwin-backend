@@ -12,6 +12,13 @@ router = APIRouter()
 APPLICATION_TABLE = "vt_beta_applications"
 _EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,24}$")
 
+# Total "first 20 beta testers" discount slots (50% off, 6 months, once a
+# paid plan is chosen). The actual grant-tracking table/race-safe counting
+# mechanism/Stripe coupon logic is still plan-only (2026-08-21) — until it
+# exists, zero grants can possibly have been given out yet, so the honest
+# current answer is simply the full total.
+TOTAL_DISCOUNT_SLOTS = 20
+
 _NOT_CONFIGURED_MESSAGE = {
     "de": "Die Beta-Bewerbung ist aktuell technisch nicht verf\u00fcgbar. Bitte versuche es sp\u00e4ter erneut oder schreib uns direkt an info@vitaltwin.de.",
     "en": "The beta application is currently technically unavailable. Please try again later or write to us directly at info@vitaltwin.de.",
@@ -161,3 +168,14 @@ async def beta_application_status(email: str, request: Request, locale: str | No
         raise HTTPException(status_code=400, detail="Bitte gib eine gültige E-Mail-Adresse ein")
     status = _db_application_status(normalized_email, resolved_locale)
     return {"applied": status is not None, "status": status}
+
+
+@router.get("/discount-slots-remaining")
+async def beta_discount_slots_remaining(request: Request):
+    """Public, no-auth endpoint feeding the "first 20 beta testers" 50%-
+    discount counter shown on the homepage and /preise. No user data of
+    any kind is exposed or required — just a plain integer. See the
+    `TOTAL_DISCOUNT_SLOTS` module comment for why this is currently a
+    constant rather than a real grant count."""
+    enforce_rate_limit(request, "beta_discount_slots", max_requests=60, window_seconds=60)
+    return {"remaining_slots": TOTAL_DISCOUNT_SLOTS, "total_slots": TOTAL_DISCOUNT_SLOTS}
