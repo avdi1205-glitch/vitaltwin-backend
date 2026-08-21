@@ -932,6 +932,33 @@ class TestListBetaTesters:
         assert set(result["testers"][0].keys()) <= allowed_keys
 
 
+class TestListBetaDiscountGrants:
+    @pytest.mark.anyio
+    async def test_requires_view_users_permission(self, monkeypatch, permission_spy):
+        monkeypatch.setattr(admin_module, "list_discount_grants", lambda: [])
+        await admin_module.list_beta_discount_grants(authorization="Bearer x")
+        assert permission_spy[-1] == ("Bearer x", "view_users")
+
+    @pytest.mark.anyio
+    async def test_returns_summary_and_grants(self, monkeypatch, permission_spy):
+        grants = [
+            {"email": "first@example.com", "slot_number": 1, "status": "granted"},
+            {"email": "second@example.com", "slot_number": 2, "status": "applied"},
+        ]
+        monkeypatch.setattr(admin_module, "list_discount_grants", lambda: grants)
+        result = await admin_module.list_beta_discount_grants(authorization="Bearer x")
+        assert result["total_slots"] == 20
+        assert result["claimed_slots"] == 2
+        assert result["remaining_slots"] == 18
+        assert result["grants"] == grants
+
+    @pytest.mark.anyio
+    async def test_remaining_slots_never_negative(self, monkeypatch, permission_spy):
+        monkeypatch.setattr(admin_module, "list_discount_grants", lambda: [{"slot_number": i} for i in range(1, 21)])
+        result = await admin_module.list_beta_discount_grants(authorization="Bearer x")
+        assert result["remaining_slots"] == 0
+
+
 class TestQACleanup:
     @pytest.mark.anyio
     async def test_preview_requires_super_admin(self, monkeypatch, fake_supabase):

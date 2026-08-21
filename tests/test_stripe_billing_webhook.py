@@ -181,6 +181,26 @@ class TestSubscriptionUpsert:
         assert set_plan_calls == []
 
 
+class TestSubscriptionUpsertMarksBetaDiscountApplied:
+    def test_active_subscription_marks_the_discount_grant_applied(self, fake_supabase, fake_customer_email, plan_service_spy, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(payments_module, "mark_grant_applied", lambda email: calls.append(email))
+        payments_module._handle_subscription_upsert({"id": "sub_1", "customer": "cus_1", "status": "active"})
+        assert calls == ["user@example.com"]
+
+    def test_trialing_subscription_also_marks_it_applied(self, fake_supabase, fake_customer_email, plan_service_spy, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(payments_module, "mark_grant_applied", lambda email: calls.append(email))
+        payments_module._handle_subscription_upsert({"id": "sub_1", "customer": "cus_1", "status": "trialing"})
+        assert calls == ["user@example.com"]
+
+    def test_past_due_status_never_marks_it_applied(self, fake_supabase, fake_customer_email, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(payments_module, "mark_grant_applied", lambda email: calls.append(email))
+        payments_module._handle_subscription_upsert({"id": "sub_1", "customer": "cus_1", "status": "past_due"})
+        assert calls == []
+
+
 class TestSubscriptionDeleted:
     def test_marks_canceled_and_downgrades_to_free_plan(self, fake_supabase, fake_customer_email, monkeypatch):
         set_plan_calls: list[tuple] = []

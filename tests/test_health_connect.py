@@ -437,6 +437,49 @@ class TestHealthConnectSyncRunLogging:
 
 
 # ---------------------------------------------------------------------------
+# "First 20 active beta testers" discount program hook
+# ---------------------------------------------------------------------------
+
+
+class TestBetaDiscountProgramHook:
+    def test_completed_sync_triggers_the_discount_hook_with_email_and_user_id(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42, email="tester@example.com")
+        calls: list[tuple[str, int | None]] = []
+        monkeypatch.setattr(
+            router_module, "maybe_claim_discount_slot", lambda email, user_id=None: calls.append((email, user_id))
+        )
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {"steps": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z"}]}},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        assert calls == [("tester@example.com", 42)]
+
+    def test_hook_is_not_called_when_nothing_was_actually_synced(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+        calls: list[object] = []
+        monkeypatch.setattr(router_module, "maybe_claim_discount_slot", lambda *a, **k: calls.append(1))
+        client.post("/api/health/health-connect/sync", json={"records": {}}, headers={"Authorization": "Bearer t"})
+        assert calls == []
+
+    def test_hook_failure_never_breaks_the_sync_response(self, client, fake_supabase, monkeypatch):
+        _auth_as(monkeypatch, user_id=42)
+
+        def _boom(*a, **k):
+            raise RuntimeError("discount program unavailable")
+
+        monkeypatch.setattr(router_module, "maybe_claim_discount_slot", _boom)
+        resp = client.post(
+            "/api/health/health-connect/sync",
+            json={"records": {"steps": [{"id": "r1", "count": 500, "startTime": "2026-08-13T08:00:00Z"}]}},
+            headers={"Authorization": "Bearer t"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["results"]["steps"]["stored"] == 1
+
+
+# ---------------------------------------------------------------------------
 # resolve_trend_source — 3-tier precedence (Google Health > Health Connect > manual)
 # ---------------------------------------------------------------------------
 

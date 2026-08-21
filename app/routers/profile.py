@@ -13,6 +13,7 @@ from ..core.auth import require_email as _require_email_dependency
 from ..core.auth import get_user_id_by_email
 from ..core.audit import record_audit_event
 from ..core.concurrency import run_parallel
+from ..core.beta_discount_program import maybe_claim_discount_slot
 from ..core.learning_events import record_learning_event
 from ..core.validation import (
     MAX_SYNC_EXPORT_ROWS,
@@ -642,6 +643,13 @@ async def upsert_daily_entry(data: DailyWellnessEntryInput, authorization: str |
         entity_type="daily_wellness_entry",
         entity_id=entry_date,
     )
+
+    # Best-effort: a check-in can be this user's earliest-ever qualifying
+    # action for the "first 20 active beta testers" discount program.
+    try:
+        maybe_claim_discount_slot(email)
+    except Exception:
+        pass
 
     return {"message": "Gespeichert.", "entry_date": entry_date}
 

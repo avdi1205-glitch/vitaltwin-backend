@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 
 from ..core import stripe_billing
+from ..core.beta_discount_program import get_unused_promotion_code, mark_grant_applied
 from ..core.plans import get_all_configured_price_ids, get_configured_price_id
 from ..core.plan_service import resolve_plan_from_price_id, set_plan_by_email
 from .users import get_email_by_token, set_premium_by_email
@@ -86,6 +87,15 @@ async def create_checkout(data: CreateCheckout):
     if trial_days > 0:
         checkout_payload["subscription_data"] = {"trial_period_days": trial_days}
 
+    # "First 20 active beta testers" discount program: attach the user's
+    # own restricted Promotion Code if they have an unused grant. Safe to
+    # attempt on every checkout attempt, even repeated/abandoned ones —
+    # only actually consumed once Stripe confirms a real subscription (see
+    # `_handle_subscription_upsert` below), never at session-creation time.
+    promotion_code = get_unused_promotion_code(email)
+    if promotion_code:
+        checkout_payload["discounts"] = [{"promotion_code": promotion_code}]
+
     try:
         session = stripe.checkout.Session.create(**checkout_payload)
         return {"url": session.url}
@@ -159,6 +169,12 @@ def _handle_subscription_upsert(subscription: dict) -> None:
             # nothing, so an existing configured Stripe price that predates
             # this mapping still grants access.
             set_premium_by_email(email, True)
+
+        # "First 20 active beta testers" discount program: only NOW (a
+        # genuinely confirmed real subscription, never at checkout-session
+        # creation) does an unused grant get consumed — an abandoned
+        # checkout attempt never burns the discount.
+        mark_grant_applied(email)
 
 
 def _handle_subscription_deleted(subscription: dict) -> None:

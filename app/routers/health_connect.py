@@ -36,6 +36,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 from ..core.auth import require_user
+from ..core.beta_discount_program import maybe_claim_discount_slot
 from ..core.health_normalization_service import (
     HEALTH_CONNECT_TYPES,
     health_connect_conflict_columns,
@@ -54,10 +55,12 @@ SYNC_RUN_TABLE = "health_sync_runs"
 ALLOWED_SYNC_TYPES = ("manual", "background")
 
 
-def _require_user_id(authorization: str | None) -> int:
+def _require_user_id(authorization: str | None) -> tuple[int, str]:
     """Mirrors `routers/google_health.py::_require_user_id` exactly — same
     identity resolution, same entitlement (Health Connect and Google Health
-    are the same Premium "automatic health data" capability)."""
+    are the same Premium "automatic health data" capability). Returns both
+    the user_id and email since the discount-program trigger below needs
+    the email (that table is email-keyed, matching check-ins/twin-calcs)."""
     current = require_user(authorization)
     if current.user_id is None:
         raise HTTPException(status_code=401, detail="Nicht eingeloggt")
@@ -66,7 +69,7 @@ def _require_user_id(authorization: str | None) -> int:
             status_code=403,
             detail="Automatische Gesundheitsdaten sind ein Premium-Feature. Aktiviere Premium unter /preise.",
         )
-    return current.user_id
+    return current.user_id, current.email
 
 
 class HealthConnectSyncRequest(BaseModel):
@@ -88,7 +91,7 @@ class HealthConnectSyncRequest(BaseModel):
 
 @router.post("/health-connect/sync")
 async def health_connect_sync(body: HealthConnectSyncRequest, authorization: str | None = Header(default=None)):
-    user_id = _require_user_id(authorization)
+    user_id, email = _require_user_id(authorization)
     started_at = datetime.now(timezone.utc)
 
     results: dict[str, dict[str, int]] = {}
@@ -159,6 +162,15 @@ async def health_connect_sync(body: HealthConnectSyncRequest, authorization: str
                 "records_skipped": total_skipped,
                 "error_message": debug_last_error,
             }).execute()
+        except Exception:
+            pass
+
+    # Best-effort: a completed Health Connect sync can be this user's
+    # earliest-ever qualifying action for the "first 20 active beta
+    # testers" discount program.
+    if total_received > 0 and status == "completed":
+        try:
+            maybe_claim_discount_slot(email, user_id)
         except Exception:
             pass
 

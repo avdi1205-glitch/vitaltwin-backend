@@ -48,6 +48,14 @@ NUTRITION_TABLE = "vt_nutrition_entries"
 #   deleted here. A future anonymization pass (keep the financial record,
 #   strip the email) would need explicit legal/accounting sign-off from the
 #   founder; not invented here.
+# - `vt_beta_discount_grants` (migration 043, "first 20 active beta
+#   testers" 50%-off-6-months program, GoBD-Prinzip check per Constitution
+#   Rule 12): same reasoning as the Stripe tables above — a grant row
+#   directly explains why a real Stripe invoice/subscription shows a
+#   reduced price, so deleting it would break that audit trail while the
+#   underlying (retained) Stripe records remain. Deliberately NOT listed
+#   in `_DIRECT_EMAIL_TABLES` below; revisit only with the same
+#   legal/accounting sign-off as the Stripe tables, never unilaterally.
 # - `vt_contact_messages`/`vt_beta_applications`: independent business
 #   records (a contact message or beta application isn't necessarily tied
 #   to a registered account — e.g. a prospect who never registered) — same

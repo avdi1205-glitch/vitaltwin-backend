@@ -1,23 +1,23 @@
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from ..core.locale import resolve_locale
 from ..core.supabase import supabase_admin
 from ..core.rate_limit import enforce_rate_limit
+from ..core.auth import require_email
+from ..core.beta_discount_program import (
+    GRANTS_TABLE as _GRANTS_TABLE,
+    TOTAL_DISCOUNT_SLOTS,
+    get_discount_grant_for_email,
+)
+from ..core.supabase import supabase
 
 router = APIRouter()
 
 APPLICATION_TABLE = "vt_beta_applications"
 _EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,24}$")
-
-# Total "first 20 beta testers" discount slots (50% off, 6 months, once a
-# paid plan is chosen). The actual grant-tracking table/race-safe counting
-# mechanism/Stripe coupon logic is still plan-only (2026-08-21) — until it
-# exists, zero grants can possibly have been given out yet, so the honest
-# current answer is simply the full total.
-TOTAL_DISCOUNT_SLOTS = 20
 
 _NOT_CONFIGURED_MESSAGE = {
     "de": "Die Beta-Bewerbung ist aktuell technisch nicht verf\u00fcgbar. Bitte versuche es sp\u00e4ter erneut oder schreib uns direkt an info@vitaltwin.de.",
@@ -174,8 +174,36 @@ async def beta_application_status(email: str, request: Request, locale: str | No
 async def beta_discount_slots_remaining(request: Request):
     """Public, no-auth endpoint feeding the "first 20 beta testers" 50%-
     discount counter shown on the homepage and /preise. No user data of
-    any kind is exposed or required — just a plain integer. See the
-    `TOTAL_DISCOUNT_SLOTS` module comment for why this is currently a
-    constant rather than a real grant count."""
+    any kind is exposed or required — just a plain integer, computed from
+    a real count against `vt_beta_discount_grants` (migration 043). Falls
+    back to the full total if the table doesn't exist yet in this
+    environment (e.g. migration not yet run) rather than erroring."""
     enforce_rate_limit(request, "beta_discount_slots", max_requests=60, window_seconds=60)
-    return {"remaining_slots": TOTAL_DISCOUNT_SLOTS, "total_slots": TOTAL_DISCOUNT_SLOTS}
+    try:
+        response = supabase.table(_GRANTS_TABLE).select("id", count="exact").execute()
+        granted_count = response.count or 0
+    except Exception:
+        granted_count = 0
+    remaining = max(0, TOTAL_DISCOUNT_SLOTS - granted_count)
+    return {"remaining_slots": remaining, "total_slots": TOTAL_DISCOUNT_SLOTS}
+
+
+@router.get("/my-discount")
+async def my_discount_grant(authorization: str | None = Header(default=None)):
+    """Account-transparency endpoint: shows the authenticated user their
+    OWN "first 20 active beta testers" discount grant, if any — never any
+    other user's data. Returns `{"has_grant": false}` for everyone else,
+    never a fabricated/default grant."""
+    email = require_email(authorization)
+    grant = get_discount_grant_for_email(email)
+    if not grant:
+        return {"has_grant": False}
+    return {
+        "has_grant": True,
+        "slot_number": grant.get("slot_number"),
+        "total_slots": TOTAL_DISCOUNT_SLOTS,
+        "status": grant.get("status"),
+        "discount_percent": grant.get("discount_percent"),
+        "duration_months": grant.get("duration_months"),
+        "applied_at": grant.get("applied_at"),
+    }

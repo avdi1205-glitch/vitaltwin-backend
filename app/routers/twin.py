@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from ..core.locale import resolve_locale
 from ..core.supabase import supabase
+from ..core.beta_discount_program import maybe_claim_discount_slot
 from .users import get_email_by_token, is_premium_by_email
 
 router = APIRouter()
@@ -656,6 +657,14 @@ def _store_calculation(
         # Keep calculate endpoint stable even if persistence is temporarily unavailable.
         print(f"Failed to store calculation history: {exc}")
         return
+
+    # Best-effort: a twin calculation can be this user's earliest-ever
+    # qualifying action for the "first 20 active beta testers" discount
+    # program.
+    try:
+        maybe_claim_discount_slot(email)
+    except Exception:
+        pass
 
 
 def _build_marker_references(config: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:

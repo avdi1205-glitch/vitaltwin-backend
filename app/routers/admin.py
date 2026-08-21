@@ -38,6 +38,7 @@ from ..core.admin_rbac import ROLE_PERMISSIONS, require_admin, require_admin_per
 from ..core.account_deletion import purge_all_user_data
 from ..core.ai_usage_logger import get_ai_usage_summary
 from ..core.audit import record_audit_event
+from ..core.beta_discount_program import list_discount_grants, TOTAL_DISCOUNT_SLOTS
 from ..core.concurrency import run_parallel
 from ..core.error_events import get_error_summary
 from ..core.founder_backup_status import get_latest_backup_status, list_backups, record_backup
@@ -984,6 +985,23 @@ async def list_beta_testers(authorization: str | None = Header(default=None)):
         "premium_beta": sum(1 for t in testers if t["beta_plan"] == "premium" and t["status"] != "expired"),
     }
     return {"summary": summary, "testers": testers}
+
+
+@router.get("/beta-discount-grants")
+async def list_beta_discount_grants(authorization: str | None = Header(default=None)):
+    """"First 20 active beta testers" 50%-off-6-months discount program —
+    admin transparency list. Reuses `view_users` (no new permission) since
+    this is the same audience/sensitivity level as the existing Beta
+    Tester overview above, not raw financial/revenue data like the
+    Accounting module."""
+    require_admin_permission(authorization, "view_users")
+    grants = list_discount_grants()
+    return {
+        "total_slots": TOTAL_DISCOUNT_SLOTS,
+        "claimed_slots": len(grants),
+        "remaining_slots": max(0, TOTAL_DISCOUNT_SLOTS - len(grants)),
+        "grants": grants,
+    }
 
 
 @router.get("/users/{email}/login-history")
