@@ -614,6 +614,7 @@ async def me(authorization: str | None = Header(default=None)):
     }
 
 
+# DEPRECATED: no current frontend call site (grep-verified) — confirm no other caller exists before removing.
 @router.post("/activate-beta")
 async def activate_beta(authorization: str | None = Header(default=None)):
     if not authorization or not authorization.lower().startswith("bearer "):
