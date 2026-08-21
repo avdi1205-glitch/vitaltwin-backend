@@ -57,7 +57,7 @@ async def _log_startup_event() -> None:
     log_system_event(event_type="server_start", severity="info", source="app.main", message="Backend gestartet.")
 
 
-from .routers import twin, users, payments, beta, profile, chat, recommendations, twin_memory, daily_planning, privacy, admin, contact, notifications, affiliate, affiliate_admin, founder, founder_briefing, founder_tasks, founder_approval, founder_business_coach, founder_affiliate_intelligence, founder_automation, founder_ceo_intelligence, founder_documentation, founder_autopilot, health, google_health, health_connect, content, family
+from .routers import twin, users, payments, beta, profile, chat, recommendations, twin_memory, daily_planning, privacy, admin, contact, notifications, affiliate, affiliate_admin, founder, founder_briefing, founder_tasks, founder_approval, founder_business_coach, founder_affiliate_intelligence, founder_automation, founder_ceo_intelligence, founder_documentation, founder_autopilot, health, google_health, health_connect, content, family, accounting
 
 app.include_router(users.router, prefix="/api/users")
 app.include_router(twin.router, prefix="/api/twin")
@@ -74,6 +74,7 @@ app.include_router(contact.router, prefix="/api/contact")
 app.include_router(notifications.router, prefix="/api/notifications")
 app.include_router(affiliate.router, prefix="/api/affiliate")
 app.include_router(affiliate_admin.router, prefix="/api/admin/affiliate")
+app.include_router(accounting.router, prefix="/api/admin/accounting")
 app.include_router(health.router, prefix="/api/health", tags=["Health Data"])
 app.include_router(google_health.router, prefix="/api/health", tags=["Google Health"])
 app.include_router(health_connect.router, prefix="/api/health", tags=["Health Connect"])

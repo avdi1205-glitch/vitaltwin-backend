@@ -82,6 +82,8 @@ Permission = Literal[
     "manage_documentation",
     "view_founder_autopilot",
     "manage_founder_autopilot",
+    "view_accounting",
+    "manage_accounting",
 ]
 
 _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignore[attr-defined]
@@ -140,6 +142,14 @@ _ALL_PERMISSIONS: frozenset[str] = frozenset(Permission.__args__)  # type: ignor
 #   `executive_analyst` additionally gets `view_founder_autopilot`
 #   (read-only, same role reused across H and J per spec's explicit
 #   "ausdrücklich freigegebene executive_analyst-Rolle").
+# - Accounting (Buchhaltungs-Grundlage, GoBD/Steuerberater-Handover,
+#   2026-08-21): same stricter-than-usual treatment as CEO Intelligence/
+#   Autopilot, and for the same reason plus one more -- this surfaces real
+#   Stripe+AdSense revenue data prepared for direct handover to a tax
+#   advisor, so `admin` does NOT get it automatically either. Only
+#   `super_admin` has `view_accounting`/`manage_accounting` by default;
+#   widen this deliberately (e.g. for a future bookkeeper-admin role) by
+#   editing this dict, not by loosening the permission check itself.
 ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
     "super_admin": frozenset(_ALL_PERMISSIONS),  # type: ignore[arg-type]
     "admin": frozenset(
@@ -150,6 +160,7 @@ ROLE_PERMISSIONS: dict[AdminRole, frozenset[Permission]] = {
             "view_ceo_intelligence", "manage_ceo_intelligence",
             "view_documentation", "manage_documentation",
             "view_founder_autopilot", "manage_founder_autopilot",
+            "view_accounting", "manage_accounting",
         }
     ),  # type: ignore[arg-type]
     "automation_manager": frozenset({"view_automation_engine", "manage_automation_engine"}),

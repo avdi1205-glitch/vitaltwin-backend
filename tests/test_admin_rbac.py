@@ -64,8 +64,8 @@ class TestPermissionMatrix:
             "documentation_editor",
         }
 
-    def test_super_admin_has_all_thirty_four_permissions(self):
-        assert len(ROLE_PERMISSIONS["super_admin"]) == 34
+    def test_super_admin_has_all_thirty_six_permissions(self):
+        assert len(ROLE_PERMISSIONS["super_admin"]) == 36
 
     def test_only_super_admin_can_manage_roles(self):
         roles_with_manage_roles = {
@@ -84,8 +84,17 @@ class TestPermissionMatrix:
             "manage_roles", "manage_security", "view_automation_engine", "manage_automation_engine",
             "view_ceo_intelligence", "manage_ceo_intelligence", "view_documentation", "manage_documentation",
             "view_founder_autopilot", "manage_founder_autopilot",
+            "view_accounting", "manage_accounting",
         }
         assert ROLE_PERMISSIONS["admin"] == expected
+
+    def test_only_super_admin_can_manage_accounting(self):
+        managers = {role for role, perms in ROLE_PERMISSIONS.items() if "manage_accounting" in perms}
+        assert managers == {"super_admin"}
+
+    def test_only_super_admin_can_view_accounting(self):
+        viewers = {role for role, perms in ROLE_PERMISSIONS.items() if "view_accounting" in perms}
+        assert viewers == {"super_admin"}
 
     def test_executive_analyst_has_ceo_and_autopilot_read_access(self):
         assert ROLE_PERMISSIONS["executive_analyst"] == {"view_ceo_intelligence", "view_founder_autopilot"}
