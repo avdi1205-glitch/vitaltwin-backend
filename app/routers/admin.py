@@ -989,18 +989,15 @@ async def list_beta_discount_grants(authorization: str | None = Header(default=N
     Accounting module."""
     require_admin_permission(authorization, "view_users")
     all_grants = list_discount_grants()
-    emails = [g["email"] for g in all_grants if g.get("email")]
-    try:
-        user_rows = supabase.table(USER_TABLE).select("email,full_name").in_("email", emails).execute().data or []
-        full_names = {row["email"]: row.get("full_name") for row in user_rows if row.get("email")}
-    except Exception:
-        full_names = {}
     # QA-test grants (e.g. an internal screenshot-demo account) are shown
     # separately, never mixed into the real-tester list/counts -- a wasted
     # test claim must never look like a real slot in this summary either
-    # (2026-08-22 slot-1 compensation decision).
-    real_grants = [g for g in all_grants if not _is_qa_test_account(g.get("email", ""), full_names.get(g.get("email", "")))]
-    test_grants = [g for g in all_grants if _is_qa_test_account(g.get("email", ""), full_names.get(g.get("email", "")))]
+    # (2026-08-22 slot-1 compensation decision). Uses the persisted
+    # is_test_grant column (migration 046, set at claim time), not a live
+    # vt_users join -- the join breaks permanently once the test
+    # account's user row is deleted (account_deletion.py).
+    real_grants = [g for g in all_grants if not g.get("is_test_grant")]
+    test_grants = [g for g in all_grants if g.get("is_test_grant")]
     return {
         "total_slots": TOTAL_DISCOUNT_SLOTS,
         "claimed_slots": len(real_grants),

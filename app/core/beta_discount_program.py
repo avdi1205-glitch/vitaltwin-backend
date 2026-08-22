@@ -265,6 +265,17 @@ def maybe_claim_discount_slot(email: str, user_id: int | None = None) -> dict[st
         rows = response.data or []
         result = rows[0] if rows else None
         if result and result.get("granted") and result.get("slot_number") is not None:
+            try:
+                user_rows = supabase.table("vt_users").select("full_name").eq("email", email).limit(1).execute().data or []
+                full_name = user_rows[0].get("full_name") if user_rows else None
+            except Exception:
+                full_name = None
+            try:
+                supabase.table(GRANTS_TABLE).update(
+                    {"is_test_grant": is_qa_test_account(email, full_name)}
+                ).eq("email", email).execute()
+            except Exception:
+                pass
             promo_id = _create_promotion_code_for_grant(email, result["slot_number"], expires_at)
             if promo_id:
                 try:
@@ -348,25 +359,20 @@ def list_discount_grants() -> list[dict[str, object]]:
 
 
 def _real_grants_sorted_by_created_at() -> list[dict[str, object]]:
-    """All grants EXCEPT QA-test accounts (core/qa_test_accounts.py --
-    the same project-wide double-check as the Admin QA-cleanup tool),
-    oldest first. The table is tiny (capped at ~21 rows) so filtering in
-    Python instead of a DB-side NOT LIKE is simple and avoids any
-    PostgREST filter-syntax uncertainty. Never raises -- an empty list on
-    any failure, same convention as the rest of this module."""
+    """All grants EXCEPT QA-test accounts, oldest first. Uses the
+    persisted `is_test_grant` column (set once at claim time in
+    `maybe_claim_discount_slot`, backfilled for pre-existing rows by
+    migration 046) rather than a live vt_users.full_name join -- a live
+    join breaks PERMANENTLY once the test account's vt_users row is
+    hard-deleted (account_deletion.py), which is the exact intended
+    lifecycle here (grant kept for GoBD, user purged). Never raises -- an
+    empty list on any failure, same convention as the rest of this
+    module."""
     try:
         grants = supabase.table(GRANTS_TABLE).select("*").order("created_at").execute().data or []
     except Exception:
         return []
-    if not grants:
-        return []
-    emails = [g["email"] for g in grants if g.get("email")]
-    try:
-        user_rows = supabase.table("vt_users").select("email,full_name").in_("email", emails).execute().data or []
-        full_names = {row["email"]: row.get("full_name") for row in user_rows if row.get("email")}
-    except Exception:
-        full_names = {}
-    return [g for g in grants if not is_qa_test_account(g.get("email", ""), full_names.get(g.get("email", "")))]
+    return [g for g in grants if not g.get("is_test_grant")]
 
 
 def count_real_claimed_slots() -> int:

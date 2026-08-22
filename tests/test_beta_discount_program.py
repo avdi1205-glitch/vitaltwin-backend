@@ -197,6 +197,60 @@ class TestMaybeClaimDiscountSlot:
         delta_days = (expires_at - before).days
         assert 360 <= delta_days <= 366  # ~12 calendar months
 
+    def test_persists_is_test_grant_false_for_a_real_account(self, monkeypatch):
+        fake = _FakeSupabase(
+            tables={
+                "vt_daily_wellness_entries": [{"email": "real-user@example.com", "created_at": AFTER_LAUNCH}],
+                "vt_users": [{"email": "real-user@example.com", "full_name": "Real User"}],
+            },
+            rpc_result=[{"slot_number": 2, "granted": True}],
+        )
+        monkeypatch.setattr(program, "supabase", fake)
+        monkeypatch.setattr(program, "_create_promotion_code_for_grant", lambda email, slot, expires_at: None)
+        program.maybe_claim_discount_slot("real-user@example.com")
+        is_test_updates = [u for u in fake.updates if "is_test_grant" in u[2]]
+        assert len(is_test_updates) == 1
+        _, filters, payload = is_test_updates[0]
+        assert filters["email"] == "real-user@example.com"
+        assert payload["is_test_grant"] is False
+
+    def test_persists_is_test_grant_true_for_a_qa_test_account(self, monkeypatch):
+        fake = _FakeSupabase(
+            tables={
+                "vt_daily_wellness_entries": [{"email": "qa-test-newone@example.com", "created_at": AFTER_LAUNCH}],
+                "vt_users": [{"email": "qa-test-newone@example.com", "full_name": "QA TEST ACCOUNT New One"}],
+            },
+            rpc_result=[{"slot_number": 3, "granted": True}],
+        )
+        monkeypatch.setattr(program, "supabase", fake)
+        monkeypatch.setattr(program, "_create_promotion_code_for_grant", lambda email, slot, expires_at: None)
+        program.maybe_claim_discount_slot("qa-test-newone@example.com")
+        is_test_updates = [u for u in fake.updates if "is_test_grant" in u[2]]
+        assert len(is_test_updates) == 1
+        _, filters, payload = is_test_updates[0]
+        assert filters["email"] == "qa-test-newone@example.com"
+        assert payload["is_test_grant"] is True
+
+    def test_is_test_grant_persistence_failure_never_blocks_the_claim(self, monkeypatch):
+        base = _FakeSupabase(
+            tables={"vt_daily_wellness_entries": [{"email": "newbie@example.com", "created_at": AFTER_LAUNCH}]},
+            rpc_result=[{"slot_number": 1, "granted": True}],
+        )
+
+        class _VtUsersBoom:
+            def table(self, name):
+                if name == "vt_users":
+                    raise RuntimeError("db down")
+                return base.table(name)
+
+            def rpc(self, fn_name, params):
+                return base.rpc(fn_name, params)
+
+        monkeypatch.setattr(program, "supabase", _VtUsersBoom())
+        monkeypatch.setattr(program, "_create_promotion_code_for_grant", lambda email, slot, expires_at: None)
+        result = program.maybe_claim_discount_slot("newbie@example.com")
+        assert result == {"slot_number": 1, "granted": True}
+
 
 class TestExcludedEmails:
     def test_excluded_email_never_claims_a_slot_even_with_qualifying_activity(self, monkeypatch):
@@ -408,43 +462,43 @@ class TestListDiscountGrants:
 
 
 class TestRealGrantsExcludeQaTestAccounts:
-    def _grants_and_users(self):
-        grants = [
-            {"email": "qa-test-screenshot-demo@example.com", "created_at": "2026-08-20T00:00:00+00:00", "slot_number": 1},
-            {"email": "real-one@example.com", "created_at": "2026-08-21T00:00:00+00:00", "slot_number": 2},
-            {"email": "real-two@example.com", "created_at": "2026-08-22T00:00:00+00:00", "slot_number": 3},
+    def _grants(self):
+        return [
+            {"email": "qa-test-screenshot-demo@example.com", "created_at": "2026-08-20T00:00:00+00:00", "slot_number": 1, "is_test_grant": True},
+            {"email": "real-one@example.com", "created_at": "2026-08-21T00:00:00+00:00", "slot_number": 2, "is_test_grant": False},
+            {"email": "real-two@example.com", "created_at": "2026-08-22T00:00:00+00:00", "slot_number": 3, "is_test_grant": False},
         ]
-        users = [
-            {"email": "qa-test-screenshot-demo@example.com", "full_name": "QA TEST ACCOUNT Screenshot Demo"},
-            {"email": "real-one@example.com", "full_name": "Real One"},
-            {"email": "real-two@example.com", "full_name": "Real Two"},
-        ]
-        return grants, users
 
     def test_count_real_claimed_slots_excludes_test_account(self, monkeypatch):
-        grants, users = self._grants_and_users()
-        fake = _FakeSupabase(tables={program.GRANTS_TABLE: grants, "vt_users": users})
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: self._grants()})
         monkeypatch.setattr(program, "supabase", fake)
         assert program.count_real_claimed_slots() == 2
 
     def test_compute_public_rank_skips_test_account_and_ranks_by_created_at(self, monkeypatch):
-        grants, users = self._grants_and_users()
-        fake = _FakeSupabase(tables={program.GRANTS_TABLE: grants, "vt_users": users})
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: self._grants()})
         monkeypatch.setattr(program, "supabase", fake)
         assert program.compute_public_rank("real-one@example.com") == 1
         assert program.compute_public_rank("real-two@example.com") == 2
 
     def test_compute_public_rank_returns_none_for_the_test_account_itself(self, monkeypatch):
-        grants, users = self._grants_and_users()
-        fake = _FakeSupabase(tables={program.GRANTS_TABLE: grants, "vt_users": users})
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: self._grants()})
         monkeypatch.setattr(program, "supabase", fake)
         assert program.compute_public_rank("qa-test-screenshot-demo@example.com") is None
 
     def test_compute_public_rank_returns_none_for_an_email_with_no_grant(self, monkeypatch):
-        grants, users = self._grants_and_users()
-        fake = _FakeSupabase(tables={program.GRANTS_TABLE: grants, "vt_users": users})
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: self._grants()})
         monkeypatch.setattr(program, "supabase", fake)
         assert program.compute_public_rank("nobody@example.com") is None
+
+    def test_survives_the_test_accounts_vt_users_row_being_deleted(self, monkeypatch):
+        """The exact regression this migration fixes: classification must
+        stay correct even when vt_users has NO row at all for the test
+        email (post-deletion) -- proven by never touching "vt_users" here."""
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: self._grants()})
+        monkeypatch.setattr(program, "supabase", fake)
+        assert program.count_real_claimed_slots() == 2
+        assert program.compute_public_rank("qa-test-screenshot-demo@example.com") is None
+        assert "vt_users" not in fake._tables or fake._tables["vt_users"] == []
 
     def test_never_raises_on_db_error(self, monkeypatch):
         class _Boom:
