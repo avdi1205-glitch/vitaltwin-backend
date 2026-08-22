@@ -110,15 +110,8 @@ ALLOWED_CONTENT_TYPES = {"blog", "faq", "landing_page", "help_page", "notificati
 ALLOWED_CONTENT_STATUSES = {"draft", "published", "archived"}
 
 # The one, project-wide QA-test-account marker (Admin Control Center §QA
-# Cleanup) — deliberately NOT "email contains 'test'" (far too broad, would
-# risk matching a real user). Both the email prefix AND the full_name
-# marker must match, per the explicit double-safety requirement.
-QA_TEST_EMAIL_PREFIX = "qa-test-"
-QA_TEST_NAME_MARKER = "QA TEST ACCOUNT"
-
-
-def _is_qa_test_account(email: str, full_name: str | None) -> bool:
-    return bool(email) and email.lower().startswith(QA_TEST_EMAIL_PREFIX) and QA_TEST_NAME_MARKER in (full_name or "")
+# Cleanup) -- also reused by the beta discount program (core/qa_test_accounts.py).
+from ..core.qa_test_accounts import is_qa_test_account as _is_qa_test_account
 
 
 def _compute_account_status(*, suspended: bool, deletion_requested_at: str | None) -> str:
@@ -995,12 +988,25 @@ async def list_beta_discount_grants(authorization: str | None = Header(default=N
     Tester overview above, not raw financial/revenue data like the
     Accounting module."""
     require_admin_permission(authorization, "view_users")
-    grants = list_discount_grants()
+    all_grants = list_discount_grants()
+    emails = [g["email"] for g in all_grants if g.get("email")]
+    try:
+        user_rows = supabase.table(USER_TABLE).select("email,full_name").in_("email", emails).execute().data or []
+        full_names = {row["email"]: row.get("full_name") for row in user_rows if row.get("email")}
+    except Exception:
+        full_names = {}
+    # QA-test grants (e.g. an internal screenshot-demo account) are shown
+    # separately, never mixed into the real-tester list/counts -- a wasted
+    # test claim must never look like a real slot in this summary either
+    # (2026-08-22 slot-1 compensation decision).
+    real_grants = [g for g in all_grants if not _is_qa_test_account(g.get("email", ""), full_names.get(g.get("email", "")))]
+    test_grants = [g for g in all_grants if _is_qa_test_account(g.get("email", ""), full_names.get(g.get("email", "")))]
     return {
         "total_slots": TOTAL_DISCOUNT_SLOTS,
-        "claimed_slots": len(grants),
-        "remaining_slots": max(0, TOTAL_DISCOUNT_SLOTS - len(grants)),
-        "grants": grants,
+        "claimed_slots": len(real_grants),
+        "remaining_slots": max(0, TOTAL_DISCOUNT_SLOTS - len(real_grants)),
+        "grants": real_grants,
+        "test_grants": test_grants,
     }
 
 

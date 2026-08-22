@@ -64,6 +64,7 @@ from datetime import datetime, timezone
 import stripe
 from dateutil.relativedelta import relativedelta
 
+from .qa_test_accounts import is_qa_test_account
 from .supabase import supabase
 
 logger = logging.getLogger(__name__)
@@ -344,3 +345,49 @@ def list_discount_grants() -> list[dict[str, object]]:
         return response.data or []
     except Exception:
         return []
+
+
+def _real_grants_sorted_by_created_at() -> list[dict[str, object]]:
+    """All grants EXCEPT QA-test accounts (core/qa_test_accounts.py --
+    the same project-wide double-check as the Admin QA-cleanup tool),
+    oldest first. The table is tiny (capped at ~21 rows) so filtering in
+    Python instead of a DB-side NOT LIKE is simple and avoids any
+    PostgREST filter-syntax uncertainty. Never raises -- an empty list on
+    any failure, same convention as the rest of this module."""
+    try:
+        grants = supabase.table(GRANTS_TABLE).select("*").order("created_at").execute().data or []
+    except Exception:
+        return []
+    if not grants:
+        return []
+    emails = [g["email"] for g in grants if g.get("email")]
+    try:
+        user_rows = supabase.table("vt_users").select("email,full_name").in_("email", emails).execute().data or []
+        full_names = {row["email"]: row.get("full_name") for row in user_rows if row.get("email")}
+    except Exception:
+        full_names = {}
+    return [g for g in grants if not is_qa_test_account(g.get("email", ""), full_names.get(g.get("email", "")))]
+
+
+def count_real_claimed_slots() -> int:
+    """Public-facing claimed-slot count -- QA-test grants (e.g. an
+    internal screenshot-demo account) never count toward the real "first
+    20" promise, per the 2026-08-22 slot-1 compensation decision."""
+    return len(_real_grants_sorted_by_created_at())
+
+
+def compute_public_rank(email: str) -> int | None:
+    """1-based rank of this email among REAL (non-test) grants only,
+    ordered by grant creation time -- the number actually shown to the
+    grantee, replacing the raw DB `slot_number` (which is an internal
+    allocation detail, not a public promise, and could differ from the
+    public rank whenever a test/QA claim wastes a raw sequence value, per
+    the 2026-08-22 slot-1 incident). Returns None if this email has no
+    real grant (no grant at all, or its own grant is itself a QA-test
+    account)."""
+    real_grants = _real_grants_sorted_by_created_at()
+    for index, grant in enumerate(real_grants, start=1):
+        if grant.get("email") == email:
+            return index
+    return None
+

@@ -934,29 +934,57 @@ class TestListBetaTesters:
 
 class TestListBetaDiscountGrants:
     @pytest.mark.anyio
-    async def test_requires_view_users_permission(self, monkeypatch, permission_spy):
+    async def test_requires_view_users_permission(self, monkeypatch, permission_spy, fake_supabase):
         monkeypatch.setattr(admin_module, "list_discount_grants", lambda: [])
         await admin_module.list_beta_discount_grants(authorization="Bearer x")
         assert permission_spy[-1] == ("Bearer x", "view_users")
 
     @pytest.mark.anyio
-    async def test_returns_summary_and_grants(self, monkeypatch, permission_spy):
+    async def test_returns_summary_and_grants(self, monkeypatch, permission_spy, fake_supabase):
         grants = [
             {"email": "first@example.com", "slot_number": 1, "status": "granted"},
             {"email": "second@example.com", "slot_number": 2, "status": "applied"},
         ]
+        fake_supabase.store["vt_users"] = {
+            "data": [
+                {"email": "first@example.com", "full_name": "First Real Tester"},
+                {"email": "second@example.com", "full_name": "Second Real Tester"},
+            ]
+        }
         monkeypatch.setattr(admin_module, "list_discount_grants", lambda: grants)
         result = await admin_module.list_beta_discount_grants(authorization="Bearer x")
         assert result["total_slots"] == 20
         assert result["claimed_slots"] == 2
         assert result["remaining_slots"] == 18
         assert result["grants"] == grants
+        assert result["test_grants"] == []
 
     @pytest.mark.anyio
-    async def test_remaining_slots_never_negative(self, monkeypatch, permission_spy):
-        monkeypatch.setattr(admin_module, "list_discount_grants", lambda: [{"slot_number": i} for i in range(1, 21)])
+    async def test_remaining_slots_never_negative(self, monkeypatch, permission_spy, fake_supabase):
+        grants = [{"email": f"real{i}@example.com", "slot_number": i} for i in range(1, 21)]
+        fake_supabase.store["vt_users"] = {"data": [{"email": g["email"], "full_name": f"Tester {i}"} for i, g in enumerate(grants)]}
+        monkeypatch.setattr(admin_module, "list_discount_grants", lambda: grants)
         result = await admin_module.list_beta_discount_grants(authorization="Bearer x")
         assert result["remaining_slots"] == 0
+
+    @pytest.mark.anyio
+    async def test_qa_test_grant_excluded_from_real_counts_and_listed_separately(self, monkeypatch, permission_spy, fake_supabase):
+        grants = [
+            {"email": "qa-test-screenshot-demo@example.com", "slot_number": 1, "status": "granted"},
+            {"email": "real-tester@example.com", "slot_number": 2, "status": "granted"},
+        ]
+        fake_supabase.store["vt_users"] = {
+            "data": [
+                {"email": "qa-test-screenshot-demo@example.com", "full_name": "QA TEST ACCOUNT Screenshot Demo"},
+                {"email": "real-tester@example.com", "full_name": "Real Tester"},
+            ]
+        }
+        monkeypatch.setattr(admin_module, "list_discount_grants", lambda: grants)
+        result = await admin_module.list_beta_discount_grants(authorization="Bearer x")
+        assert result["claimed_slots"] == 1
+        assert result["remaining_slots"] == 19
+        assert [g["email"] for g in result["grants"]] == ["real-tester@example.com"]
+        assert [g["email"] for g in result["test_grants"]] == ["qa-test-screenshot-demo@example.com"]
 
 
 class TestQACleanup:

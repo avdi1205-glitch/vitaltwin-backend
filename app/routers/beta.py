@@ -8,11 +8,11 @@ from ..core.supabase import supabase_admin
 from ..core.rate_limit import enforce_rate_limit
 from ..core.auth import require_email
 from ..core.beta_discount_program import (
-    GRANTS_TABLE as _GRANTS_TABLE,
     TOTAL_DISCOUNT_SLOTS,
+    compute_public_rank,
+    count_real_claimed_slots,
     get_discount_grant_for_email,
 )
-from ..core.supabase import supabase
 
 router = APIRouter()
 
@@ -175,13 +175,14 @@ async def beta_discount_slots_remaining(request: Request):
     """Public, no-auth endpoint feeding the "first 20 beta testers" 50%-
     discount counter shown on the homepage and /preise. No user data of
     any kind is exposed or required — just a plain integer, computed from
-    a real count against `vt_beta_discount_grants` (migration 043). Falls
-    back to the full total if the table doesn't exist yet in this
-    environment (e.g. migration not yet run) rather than erroring."""
+    a real count against `vt_beta_discount_grants` (migration 043),
+    EXCLUDING internal QA-test grants (2026-08-22 slot-1 compensation
+    decision — a test claim must never count toward the public "20"
+    promise). Falls back to the full total if the table doesn't exist yet
+    in this environment (e.g. migration not yet run) rather than erroring."""
     enforce_rate_limit(request, "beta_discount_slots", max_requests=60, window_seconds=60)
     try:
-        response = supabase.table(_GRANTS_TABLE).select("id", count="exact").execute()
-        granted_count = response.count or 0
+        granted_count = count_real_claimed_slots()
     except Exception:
         granted_count = 0
     remaining = max(0, TOTAL_DISCOUNT_SLOTS - granted_count)
@@ -193,14 +194,19 @@ async def my_discount_grant(authorization: str | None = Header(default=None)):
     """Account-transparency endpoint: shows the authenticated user their
     OWN "first 20 active beta testers" discount grant, if any — never any
     other user's data. Returns `{"has_grant": false}` for everyone else,
-    never a fabricated/default grant."""
+    never a fabricated/default grant. Returns a computed public `rank`
+    (position among real grants only) instead of the raw DB `slot_number`
+    — the raw sequence value is an internal allocation detail, never the
+    public promise (2026-08-22 slot-1 compensation decision: a wasted
+    QA-test claim must never surface as a wrong-looking number to a real
+    tester)."""
     email = require_email(authorization)
     grant = get_discount_grant_for_email(email)
     if not grant:
         return {"has_grant": False}
     return {
         "has_grant": True,
-        "slot_number": grant.get("slot_number"),
+        "rank": compute_public_rank(email),
         "total_slots": TOTAL_DISCOUNT_SLOTS,
         "status": grant.get("status"),
         "discount_percent": grant.get("discount_percent"),

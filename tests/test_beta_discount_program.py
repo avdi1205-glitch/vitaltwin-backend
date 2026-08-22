@@ -23,6 +23,11 @@ class _FakeQuery:
         self._rows = [r for r in self._rows if r.get(field) == value]
         return self
 
+    def in_(self, field, values):
+        value_set = set(values)
+        self._rows = [r for r in self._rows if r.get(field) in value_set]
+        return self
+
     def order(self, field, desc=False):
         self._rows = sorted(self._rows, key=lambda r: r.get(field) or "", reverse=desc)
         return self
@@ -400,3 +405,52 @@ class TestListDiscountGrants:
         monkeypatch.setattr(program, "supabase", fake)
         result = program.list_discount_grants()
         assert len(result) == 2
+
+
+class TestRealGrantsExcludeQaTestAccounts:
+    def _grants_and_users(self):
+        grants = [
+            {"email": "qa-test-screenshot-demo@example.com", "created_at": "2026-08-20T00:00:00+00:00", "slot_number": 1},
+            {"email": "real-one@example.com", "created_at": "2026-08-21T00:00:00+00:00", "slot_number": 2},
+            {"email": "real-two@example.com", "created_at": "2026-08-22T00:00:00+00:00", "slot_number": 3},
+        ]
+        users = [
+            {"email": "qa-test-screenshot-demo@example.com", "full_name": "QA TEST ACCOUNT Screenshot Demo"},
+            {"email": "real-one@example.com", "full_name": "Real One"},
+            {"email": "real-two@example.com", "full_name": "Real Two"},
+        ]
+        return grants, users
+
+    def test_count_real_claimed_slots_excludes_test_account(self, monkeypatch):
+        grants, users = self._grants_and_users()
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: grants, "vt_users": users})
+        monkeypatch.setattr(program, "supabase", fake)
+        assert program.count_real_claimed_slots() == 2
+
+    def test_compute_public_rank_skips_test_account_and_ranks_by_created_at(self, monkeypatch):
+        grants, users = self._grants_and_users()
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: grants, "vt_users": users})
+        monkeypatch.setattr(program, "supabase", fake)
+        assert program.compute_public_rank("real-one@example.com") == 1
+        assert program.compute_public_rank("real-two@example.com") == 2
+
+    def test_compute_public_rank_returns_none_for_the_test_account_itself(self, monkeypatch):
+        grants, users = self._grants_and_users()
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: grants, "vt_users": users})
+        monkeypatch.setattr(program, "supabase", fake)
+        assert program.compute_public_rank("qa-test-screenshot-demo@example.com") is None
+
+    def test_compute_public_rank_returns_none_for_an_email_with_no_grant(self, monkeypatch):
+        grants, users = self._grants_and_users()
+        fake = _FakeSupabase(tables={program.GRANTS_TABLE: grants, "vt_users": users})
+        monkeypatch.setattr(program, "supabase", fake)
+        assert program.compute_public_rank("nobody@example.com") is None
+
+    def test_never_raises_on_db_error(self, monkeypatch):
+        class _Boom:
+            def table(self, name):
+                raise RuntimeError("db down")
+
+        monkeypatch.setattr(program, "supabase", _Boom())
+        assert program.count_real_claimed_slots() == 0
+        assert program.compute_public_rank("anyone@example.com") is None
